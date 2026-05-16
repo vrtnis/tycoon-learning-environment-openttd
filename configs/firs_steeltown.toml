@@ -1,0 +1,29 @@
+[scenario]
+economy = "steeltown"
+seed = 1
+map_x = 8
+map_y = 8
+landscape = "temperate"
+starting_year = 1950
+towns = 3
+industries = 5
+budget = 750000
+years = 3
+allowed_modes = ["road"]
+vehicles_per_route = 5
+
+[[objective.target_chain]]
+step = 1
+source_type = "Coal Mine"
+destination_type = "Coke Oven"
+cargo = "COAL"
+deadline_year = 1
+required_delivered = 1
+
+[[objective.target_chain]]
+step = 2
+source_type = "Coke Oven"
+destination_type = "Blast Furnace"
+cargo = "COKE"
+deadline_year = 3
+required_delivered = 1

@@ -1,0 +1,146 @@
+{
+  "version": "0.1.0",
+  "scenarios": [
+    {
+      "id": "coal_easy_001",
+      "name": "Coal Starter Line",
+      "task": "Build a profitable rail or road route from Blackridge Coal Mine to Eastport Power Plant.",
+      "tags": ["coal", "starter", "single-route"],
+      "map": { "width": 64, "height": 64, "terrain_cost": 1.0 },
+      "budget": { "max_steps": 12, "max_months": 36, "starting_cash": 180000, "max_loan": 300000, "interest_rate": 0.04 },
+      "goals": { "cargo": "coal", "cargo_delivered": 900, "operating_profit": 70000, "network_routes": 1, "max_debt_ratio": 0.7 },
+      "nodes": [
+        { "id": "mine_blackridge", "name": "Blackridge Coal Mine", "kind": "industry", "x": 8, "y": 14, "produces": { "coal": 115 }, "accepts": {} },
+        { "id": "plant_eastport", "name": "Eastport Power Plant", "kind": "industry", "x": 42, "y": 17, "produces": {}, "accepts": { "coal": 125 } },
+        { "id": "town_lakeside", "name": "Lakeside", "kind": "town", "x": 25, "y": 42, "population": 900, "produces": { "passengers": 52, "mail": 18 }, "accepts": { "passengers": 60, "mail": 22, "goods": 35 } }
+      ]
+    },
+    {
+      "id": "coal_hills_002",
+      "name": "Hill Coal Decision",
+      "task": "Choose whether the longer valley route or shorter hill route can make coal delivery profitable.",
+      "tags": ["coal", "terrain", "capital"],
+      "map": { "width": 72, "height": 72, "terrain_cost": 1.35 },
+      "budget": { "max_steps": 14, "max_months": 42, "starting_cash": 145000, "max_loan": 360000, "interest_rate": 0.05 },
+      "goals": { "cargo": "coal", "cargo_delivered": 950, "operating_profit": 65000, "network_routes": 1, "max_debt_ratio": 0.8 },
+      "nodes": [
+        { "id": "mine_ridge", "name": "Ridge Coal Mine", "kind": "industry", "x": 10, "y": 10, "produces": { "coal": 130 }, "accepts": {} },
+        { "id": "plant_vale", "name": "Vale Power Plant", "kind": "industry", "x": 60, "y": 34, "produces": {}, "accepts": { "coal": 120 } },
+        { "id": "town_midvale", "name": "Midvale", "kind": "town", "x": 32, "y": 44, "population": 1100, "produces": { "passengers": 62, "mail": 19 }, "accepts": { "passengers": 66, "mail": 25 } }
+      ]
+    },
+    {
+      "id": "passenger_pair_001",
+      "name": "Two-Town Passenger Shuttle",
+      "task": "Connect Northfield and Southbay with a profitable passenger route.",
+      "tags": ["passengers", "towns", "road"],
+      "map": { "width": 56, "height": 56, "terrain_cost": 0.95 },
+      "budget": { "max_steps": 12, "max_months": 30, "starting_cash": 120000, "max_loan": 220000, "interest_rate": 0.04 },
+      "goals": { "cargo": "passengers", "cargo_delivered": 600, "operating_profit": 32000, "network_routes": 1, "max_debt_ratio": 0.6 },
+      "nodes": [
+        { "id": "town_northfield", "name": "Northfield", "kind": "town", "x": 12, "y": 12, "population": 1450, "produces": { "passengers": 80, "mail": 24 }, "accepts": { "passengers": 76, "mail": 22, "goods": 28 } },
+        { "id": "town_southbay", "name": "Southbay", "kind": "town", "x": 42, "y": 39, "population": 1320, "produces": { "passengers": 74, "mail": 21 }, "accepts": { "passengers": 82, "mail": 24, "goods": 28 } }
+      ]
+    },
+    {
+      "id": "mail_triangle_001",
+      "name": "Regional Mail Triangle",
+      "task": "Build a small mail network that avoids overbuilding passenger infrastructure.",
+      "tags": ["mail", "towns", "network"],
+      "map": { "width": 72, "height": 60, "terrain_cost": 1.05 },
+      "budget": { "max_steps": 16, "max_months": 36, "starting_cash": 135000, "max_loan": 260000, "interest_rate": 0.045 },
+      "goals": { "cargo": "mail", "cargo_delivered": 450, "operating_profit": 30000, "network_routes": 2, "max_debt_ratio": 0.65 },
+      "nodes": [
+        { "id": "town_ashford", "name": "Ashford", "kind": "town", "x": 9, "y": 13, "population": 1200, "produces": { "passengers": 65, "mail": 30 }, "accepts": { "passengers": 68, "mail": 34 } },
+        { "id": "town_benton", "name": "Benton", "kind": "town", "x": 52, "y": 16, "population": 980, "produces": { "passengers": 54, "mail": 25 }, "accepts": { "passengers": 52, "mail": 31 } },
+        { "id": "town_cedar", "name": "Cedar", "kind": "town", "x": 31, "y": 47, "population": 1040, "produces": { "passengers": 58, "mail": 28 }, "accepts": { "passengers": 61, "mail": 28 } }
+      ]
+    },
+    {
+      "id": "wood_mill_001",
+      "name": "Forest to Sawmill",
+      "task": "Move wood from Greenpine Forest to Oldmill Sawmill under a tight starting budget.",
+      "tags": ["wood", "budget", "single-route"],
+      "map": { "width": 64, "height": 52, "terrain_cost": 1.1 },
+      "budget": { "max_steps": 14, "max_months": 36, "starting_cash": 110000, "max_loan": 240000, "interest_rate": 0.05 },
+      "goals": { "cargo": "wood", "cargo_delivered": 720, "operating_profit": 42000, "network_routes": 1, "max_debt_ratio": 0.75 },
+      "nodes": [
+        { "id": "forest_greenpine", "name": "Greenpine Forest", "kind": "industry", "x": 7, "y": 40, "produces": { "wood": 82 }, "accepts": {} },
+        { "id": "sawmill_oldmill", "name": "Oldmill Sawmill", "kind": "industry", "x": 48, "y": 18, "produces": {}, "accepts": { "wood": 88 } },
+        { "id": "town_mapleton", "name": "Mapleton", "kind": "town", "x": 33, "y": 37, "population": 760, "produces": { "passengers": 40, "mail": 14 }, "accepts": { "goods": 20, "passengers": 42, "mail": 16 } }
+      ]
+    },
+    {
+      "id": "oil_distance_001",
+      "name": "Long Oil Haul",
+      "task": "Finance and operate a longer oil route without letting debt dominate the final score.",
+      "tags": ["oil", "long-distance", "debt"],
+      "map": { "width": 96, "height": 72, "terrain_cost": 1.0 },
+      "budget": { "max_steps": 16, "max_months": 48, "starting_cash": 150000, "max_loan": 500000, "interest_rate": 0.055 },
+      "goals": { "cargo": "oil", "cargo_delivered": 1100, "operating_profit": 95000, "network_routes": 1, "max_debt_ratio": 0.7 },
+      "nodes": [
+        { "id": "wells_west", "name": "West Basin Oil Wells", "kind": "industry", "x": 6, "y": 8, "produces": { "oil": 135 }, "accepts": {} },
+        { "id": "refinery_harbor", "name": "Harbor Refinery", "kind": "industry", "x": 84, "y": 58, "produces": {}, "accepts": { "oil": 140 } },
+        { "id": "town_harborview", "name": "Harborview", "kind": "town", "x": 72, "y": 48, "population": 1700, "produces": { "passengers": 92, "mail": 32 }, "accepts": { "passengers": 90, "mail": 30, "goods": 45 } }
+      ]
+    },
+    {
+      "id": "grain_goods_001",
+      "name": "Farm Market Starter",
+      "task": "Select the strongest early grain route and avoid distracting passenger demand.",
+      "tags": ["grain", "choice", "single-route"],
+      "map": { "width": 70, "height": 64, "terrain_cost": 1.0 },
+      "budget": { "max_steps": 14, "max_months": 36, "starting_cash": 130000, "max_loan": 260000, "interest_rate": 0.04 },
+      "goals": { "cargo": "grain", "cargo_delivered": 780, "operating_profit": 46000, "network_routes": 1, "max_debt_ratio": 0.7 },
+      "nodes": [
+        { "id": "farm_willow", "name": "Willow Farm", "kind": "industry", "x": 8, "y": 52, "produces": { "grain": 92 }, "accepts": {} },
+        { "id": "farm_creek", "name": "Creek Farm", "kind": "industry", "x": 18, "y": 12, "produces": { "grain": 68 }, "accepts": {} },
+        { "id": "mill_granary", "name": "Granary Mill", "kind": "industry", "x": 54, "y": 30, "produces": {}, "accepts": { "grain": 110 } },
+        { "id": "town_brook", "name": "Brook", "kind": "town", "x": 38, "y": 45, "population": 880, "produces": { "passengers": 46, "mail": 16 }, "accepts": { "passengers": 50, "mail": 17 } }
+      ]
+    },
+    {
+      "id": "goods_city_001",
+      "name": "Goods Into the City",
+      "task": "Deliver goods from a factory to the largest accepting town.",
+      "tags": ["goods", "city", "selection"],
+      "map": { "width": 80, "height": 64, "terrain_cost": 1.08 },
+      "budget": { "max_steps": 16, "max_months": 42, "starting_cash": 170000, "max_loan": 330000, "interest_rate": 0.045 },
+      "goals": { "cargo": "goods", "cargo_delivered": 720, "operating_profit": 56000, "network_routes": 1, "max_debt_ratio": 0.7 },
+      "nodes": [
+        { "id": "factory_riverton", "name": "Riverton Factory", "kind": "industry", "x": 12, "y": 49, "produces": { "goods": 78 }, "accepts": {} },
+        { "id": "town_grand", "name": "Grand Junction", "kind": "town", "x": 67, "y": 15, "population": 2400, "produces": { "passengers": 128, "mail": 44 }, "accepts": { "goods": 82, "passengers": 130, "mail": 45 } },
+        { "id": "town_riverbend", "name": "Riverbend", "kind": "town", "x": 42, "y": 55, "population": 930, "produces": { "passengers": 48, "mail": 18 }, "accepts": { "goods": 35, "passengers": 50, "mail": 18 } }
+      ]
+    },
+    {
+      "id": "multi_cargo_001",
+      "name": "Two Cargo Expansion",
+      "task": "Build at least two useful routes across mixed passenger and coal opportunities.",
+      "tags": ["multi-cargo", "expansion", "network"],
+      "map": { "width": 88, "height": 72, "terrain_cost": 1.0 },
+      "budget": { "max_steps": 20, "max_months": 48, "starting_cash": 210000, "max_loan": 430000, "interest_rate": 0.05 },
+      "goals": { "cargo": null, "cargo_delivered": 1500, "operating_profit": 115000, "network_routes": 2, "max_debt_ratio": 0.75 },
+      "nodes": [
+        { "id": "mine_north", "name": "North Coal Mine", "kind": "industry", "x": 11, "y": 12, "produces": { "coal": 112 }, "accepts": {} },
+        { "id": "plant_south", "name": "South Power Plant", "kind": "industry", "x": 76, "y": 55, "produces": {}, "accepts": { "coal": 120 } },
+        { "id": "town_kingsport", "name": "Kingsport", "kind": "town", "x": 24, "y": 52, "population": 1650, "produces": { "passengers": 92, "mail": 31 }, "accepts": { "passengers": 96, "mail": 32, "goods": 45 } },
+        { "id": "town_elm", "name": "Elm City", "kind": "town", "x": 66, "y": 18, "population": 1540, "produces": { "passengers": 87, "mail": 29 }, "accepts": { "passengers": 90, "mail": 30, "goods": 42 } }
+      ]
+    },
+    {
+      "id": "low_cash_recovery_001",
+      "name": "Low-Cash Recovery",
+      "task": "Use loans carefully to bootstrap a profitable route from a weak starting cash position.",
+      "tags": ["debt", "recovery", "starter"],
+      "map": { "width": 62, "height": 58, "terrain_cost": 1.0 },
+      "budget": { "max_steps": 16, "max_months": 42, "starting_cash": 65000, "max_loan": 260000, "interest_rate": 0.06 },
+      "goals": { "cargo": "coal", "cargo_delivered": 760, "operating_profit": 48000, "network_routes": 1, "max_debt_ratio": 0.65 },
+      "nodes": [
+        { "id": "mine_short", "name": "Shortbank Mine", "kind": "industry", "x": 16, "y": 22, "produces": { "coal": 98 }, "accepts": {} },
+        { "id": "plant_short", "name": "Shortbank Power Plant", "kind": "industry", "x": 39, "y": 26, "produces": {}, "accepts": { "coal": 105 } },
+        { "id": "town_shortbank", "name": "Shortbank", "kind": "town", "x": 30, "y": 42, "population": 820, "produces": { "passengers": 44, "mail": 15 }, "accepts": { "passengers": 45, "mail": 16 } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1921 @@
+from __future__ import annotations
+
+import builtins
+import contextlib
+import io
+import json
+import os
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import time
+import traceback
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from openttd_le.backends.firs import render_firs_live_config, verify_firs_installed
+from openttd_le.backends.openttd import _find_openttd
+from openttd_le.backends.visual import ensure_opengfx, install_live_bridge
+from openttd_le.core.types import EnvError
+from openttd_le.workbooks.export import export_run_to_xlsx
+from openttd_le.workbooks.template import read_firs_ops_workbook
+
+
+ADMIN_PASSWORD = "openttdle"
+
+
+class AdminClient:
+    def __init__(self, host: str, port: int, password: str = ADMIN_PASSWORD) -> None:
+        self.host = host
+        self.port = port
+        self.password = password
+        self.sock: socket.socket | None = None
+
+    def connect(self, timeout: float = 30.0) -> None:
+        deadline = time.time() + timeout
+        last_error: OSError | None = None
+        while time.time() < deadline:
+            try:
+                self.sock = socket.create_connection((self.host, self.port), timeout=3.0)
+                self.sock.settimeout(1.0)
+                self._send(0, _string(self.password) + _string("openttd-le") + _string("0.1"))
+                self._wait_for_types({103, 104}, timeout=10.0)
+                self._send(2, struct.pack("<HH", 9, 1 << 6))
+                return
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.5)
+        raise EnvError(f"Could not connect to OpenTTD admin port: {last_error}")
+
+    def send_gamescript(self, payload: dict[str, Any]) -> None:
+        self._send(6, _string(json.dumps(payload, separators=(",", ":"))))
+
+    def read_gamescript(self, timeout: float = 30.0) -> dict[str, Any]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            packet_type, payload = self._read_packet(deadline - time.time())
+            if packet_type == 124:
+                text = _read_string(payload)
+                return json.loads(text)
+            if packet_type == 102:
+                raise EnvError(f"OpenTTD admin error packet: {payload!r}")
+        raise EnvError("Timed out waiting for GameScript message.")
+
+    def close(self) -> None:
+        if self.sock is not None:
+            try:
+                self._send(1, b"")
+            except OSError:
+                pass
+            self.sock.close()
+        self.sock = None
+
+    def _wait_for_types(self, types: set[int], timeout: float) -> None:
+        deadline = time.time() + timeout
+        seen: set[int] = set()
+        while time.time() < deadline:
+            packet_type, _ = self._read_packet(deadline - time.time())
+            seen.add(packet_type)
+            if types.issubset(seen):
+                return
+        raise EnvError(f"Timed out during admin login. Saw packets: {sorted(seen)}")
+
+    def _send(self, packet_type: int, payload: bytes) -> None:
+        if self.sock is None:
+            raise EnvError("Admin client is not connected.")
+        size = 3 + len(payload)
+        self.sock.sendall(struct.pack("<HB", size, packet_type) + payload)
+
+    def _read_packet(self, timeout: float) -> tuple[int, bytes]:
+        if self.sock is None:
+            raise EnvError("Admin client is not connected.")
+        self.sock.settimeout(max(0.1, timeout))
+        header = _recv_exact(self.sock, 3)
+        size, packet_type = struct.unpack("<HB", header)
+        if size < 3:
+            raise EnvError(f"Invalid admin packet size: {size}")
+        return packet_type, _recv_exact(self.sock, size - 3)
+
+
+SAFE_REPL_BUILTINS = {
+    "__build_class__": builtins.__build_class__,
+    "print": builtins.print,
+    "len": builtins.len,
+    "range": builtins.range,
+    "enumerate": builtins.enumerate,
+    "zip": builtins.zip,
+    "min": builtins.min,
+    "max": builtins.max,
+    "sum": builtins.sum,
+    "sorted": builtins.sorted,
+    "list": builtins.list,
+    "dict": builtins.dict,
+    "set": builtins.set,
+    "tuple": builtins.tuple,
+    "str": builtins.str,
+    "int": builtins.int,
+    "float": builtins.float,
+    "bool": builtins.bool,
+    "abs": builtins.abs,
+    "any": builtins.any,
+    "all": builtins.all,
+    "isinstance": builtins.isinstance,
+    "object": builtins.object,
+    "Exception": builtins.Exception,
+    "ValueError": builtins.ValueError,
+}
+
+
+class FIRSReplSession:
+    def __init__(
+        self,
+        admin: AdminClient,
+        observation: dict[str, Any],
+        workbook_meta: dict[str, Any],
+        vehicles_per_route: int,
+    ) -> None:
+        self.admin = admin
+        self.observation = observation
+        self.workbook_meta = workbook_meta
+        self.vehicles_per_route = vehicles_per_route
+        self.last_stdout = ""
+        self.last_stderr = ""
+        self.last_actions: list[dict[str, Any]] = []
+        self.env: dict[str, Any] = {
+            "__builtins__": SAFE_REPL_BUILTINS,
+            "__name__": "openttd_le_firs_repl",
+        }
+        self._install_helpers()
+        self._refresh_env()
+
+    def _install_helpers(self) -> None:
+        self.env.update(
+            {
+                "observe": self.observe,
+                "build_cargo_route": self.build_cargo_route,
+                "add_vehicles": self.add_vehicles,
+                "wait_months": self.wait_months,
+                "inspect_bottlenecks": self.inspect_bottlenecks,
+                "borrow_or_repay": self.borrow_or_repay,
+            }
+        )
+
+    def candidate_routes(self) -> list[dict[str, Any]]:
+        graph = self.observation.get("industry_graph", [])
+        candidates = _candidate_firs_pairs(graph, self.workbook_meta.get("objectives", []), limit=12)
+        if not candidates:
+            candidates = _candidate_firs_pairs_from_io(
+                self.observation,
+                self.workbook_meta.get("objectives", []),
+                limit=12,
+            )
+        routes = self.observation.get("routes", [])
+        if routes:
+            candidates = [pair for pair in candidates if not _route_already_registered(pair, routes)]
+        return candidates
+
+    def _refresh_env(self) -> None:
+        self.env.update(
+            {
+                "obs": self.observation,
+                "routes": self.observation.get("routes", []),
+                "candidate_routes": self.candidate_routes(),
+                "workbook": {
+                    "scenario": self.workbook_meta.get("fields", {}),
+                    "objectives": self.workbook_meta.get("objectives", []),
+                },
+                "last_stdout": self.last_stdout,
+                "last_stderr": self.last_stderr,
+            }
+        )
+
+    def execute(self, code: str) -> dict[str, Any]:
+        self.last_actions = []
+        self._refresh_env()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                exec(code, self.env, self.env)
+            except Exception:
+                traceback.print_exc()
+        self.last_stdout = stdout.getvalue()
+        self.last_stderr = stderr.getvalue()
+        self._refresh_env()
+        return {
+            "stdout": self.last_stdout,
+            "stderr": self.last_stderr,
+            "actions": list(self.last_actions),
+            "observation": self.observation,
+        }
+
+    def _send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        self.admin.send_gamescript({"type": "action", "action": action})
+        try:
+            result = _next_result(self.admin, timeout=90.0)
+            observation = _next_observation(self.admin, timeout=90.0)
+        except Exception as exc:
+            result = {
+                "type": "result",
+                "step": self.observation.get("step"),
+                "action_type": action.get("type"),
+                "error": "action_timeout_or_error",
+                "detail": str(exc),
+            }
+            self.last_actions.append({"action": action, "result": result, "observation": self.observation})
+            return result
+        self.observation = observation
+        self.last_actions.append({"action": action, "result": result, "observation": observation})
+        return result
+
+    def observe(self) -> dict[str, Any]:
+        self.admin.send_gamescript({"type": "observe"})
+        self.observation = _next_observation(self.admin, timeout=90.0)
+        self._refresh_env()
+        return self.observation
+
+    def build_cargo_route(
+        self,
+        source_id: int,
+        destination_id: int,
+        cargo_id: int,
+        vehicles: int | None = None,
+        physical: bool = True,
+        max_path_tiles: int = 40,
+        label: str = "",
+    ) -> dict[str, Any]:
+        action = {
+            "type": "build_cargo_route",
+            "source_id": int(source_id),
+            "destination_id": int(destination_id),
+            "cargo_id": int(cargo_id),
+            "vehicles": int(vehicles if vehicles is not None else self.vehicles_per_route),
+            "physical": bool(physical),
+            "max_path_tiles": int(max_path_tiles),
+            "label": label or "repl physical cargo route",
+        }
+        return self._send_action(action)
+
+    def add_vehicles(self, route_id: str, count: int) -> dict[str, Any]:
+        return self._send_action({"type": "add_vehicles", "route_id": str(route_id), "count": int(count)})
+
+    def wait_months(self, months: int, label: str = "") -> dict[str, Any]:
+        return self._send_action({"type": "wait_months", "months": int(months), "label": label or "repl wait"})
+
+    def inspect_bottlenecks(self) -> dict[str, Any]:
+        return self._send_action({"type": "inspect_bottlenecks"})
+
+    def borrow_or_repay(self, amount: int) -> dict[str, Any]:
+        return self._send_action({"type": "borrow_or_repay", "amount": int(amount)})
+
+
+def launch_gpt_live(
+    *,
+    executable: str | None = None,
+    output_root: Path | str = "runs_live",
+    model: str = "gpt-5.5",
+    seed: int = 1,
+    steps: int = 4,
+    resolution: str = "1280x800",
+    allow_heuristic: bool = False,
+    focus_town_id: int | None = None,
+    start_delay: float = 8.0,
+    step_delay: float = 4.0,
+) -> dict[str, Any]:
+    exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
+    if not exe or not Path(exe).exists():
+        raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
+
+    if not os.environ.get("OPENAI_API_KEY") and not allow_heuristic:
+        raise EnvError("OPENAI_API_KEY is required for live GPT play. Use --allow-heuristic only for bridge testing.")
+
+    run_dir = _new_run_dir(Path(output_root))
+    ensure_opengfx()
+    installed = install_live_bridge()
+    game_port = _find_free_port(3979)
+    admin_port = _find_free_port(3977)
+    cfg_path = run_dir / "openttd.cfg"
+    cfg_text = _live_config(seed, game_port, admin_port)
+    cfg_path.write_text(cfg_text, encoding="ascii")
+    client_cfg_path = run_dir / "openttd-viewer.cfg"
+    client_cfg_path.write_text(_with_client_name(cfg_text, f"OpenTTD-LE Viewer {game_port}"), encoding="ascii")
+
+    server_cmd = [
+        str(exe),
+        "-D",
+        f"0.0.0.0:{game_port}",
+        "-g",
+        "-G",
+        str(seed),
+        "-c",
+        str(cfg_path),
+        "-x",
+        "-X",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+    ]
+    server = _popen_hidden(
+        server_cmd,
+        cwd=str(Path(exe).parent),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+    client_cmd = [
+        str(exe),
+        "-c",
+        str(client_cfg_path),
+        "-x",
+        "-X",
+        "-n",
+        f"127.0.0.1:{game_port}#255",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+        "-r",
+        resolution,
+    ]
+    client: subprocess.Popen[bytes] | None = None
+
+    trace_path = run_dir / "live_trace.jsonl"
+    admin = AdminClient("127.0.0.1", admin_port)
+    try:
+        admin.connect()
+        admin.send_gamescript({"type": "observe"})
+        observation = _next_observation(admin, timeout=60.0)
+        client = subprocess.Popen(
+            client_cmd,
+            cwd=str(Path(exe).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        time.sleep(start_delay)
+        with trace_path.open("a", encoding="utf-8") as trace:
+            trace.write(json.dumps({"event": "initial_observation", "data": observation}) + "\n")
+            for index in range(steps):
+                action = _choose_action(
+                    observation,
+                    model=model,
+                    allow_heuristic=allow_heuristic,
+                    focus_town_id=focus_town_id,
+                )
+                trace.write(json.dumps({"event": "action", "step": index + 1, "data": action}) + "\n")
+                admin.send_gamescript({"type": "action", "action": action})
+                result = _next_result(admin, timeout=60.0)
+                observation = _next_observation(admin, timeout=60.0)
+                trace.write(json.dumps({"event": "result", "step": index + 1, "data": result}) + "\n")
+                trace.write(json.dumps({"event": "observation", "step": index + 1, "data": observation}) + "\n")
+                time.sleep(step_delay)
+    finally:
+        admin.close()
+
+    launch_info = {
+        "run_dir": str(run_dir),
+        "server_pid": server.pid,
+        "client_pid": client.pid if client is not None else None,
+        "game_port": game_port,
+        "admin_port": admin_port,
+        "model": model,
+        "steps": steps,
+        "focus_town_id": focus_town_id,
+        "trace": str(trace_path),
+        "installed": installed,
+        "server_command": server_cmd,
+        "client_command": client_cmd,
+        "note": "The visible client remains open after the GPT action loop finishes.",
+    }
+    (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
+    return launch_info
+
+
+def launch_coal_objective(
+    *,
+    executable: str | None = None,
+    output_root: Path | str = "runs_coal",
+    model: str = "gpt-5.5",
+    seed: int = 1,
+    steps: int = 6,
+    resolution: str = "1280x800",
+    allow_heuristic: bool = False,
+    start_delay: float = 10.0,
+    step_delay: float = 3.0,
+) -> dict[str, Any]:
+    exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
+    if not exe or not Path(exe).exists():
+        raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
+
+    if not os.environ.get("OPENAI_API_KEY") and not allow_heuristic:
+        raise EnvError("OPENAI_API_KEY is required for GPT coal objective play. Use --allow-heuristic for bridge testing.")
+
+    run_dir = _new_run_dir(Path(output_root), suffix="coal_objective")
+    ensure_opengfx()
+    installed = install_live_bridge()
+    game_port = _find_free_port(3979)
+    admin_port = _find_free_port(3977)
+    cfg_path = run_dir / "openttd.cfg"
+    cfg_text = _live_config(seed, game_port, admin_port)
+    cfg_path.write_text(cfg_text, encoding="ascii")
+    client_cfg_path = run_dir / "openttd-viewer.cfg"
+    client_cfg_path.write_text(_with_client_name(cfg_text, f"OpenTTD-LE Viewer {game_port}"), encoding="ascii")
+
+    server_cmd = [
+        str(exe),
+        "-D",
+        f"0.0.0.0:{game_port}",
+        "-g",
+        "-G",
+        str(seed),
+        "-c",
+        str(cfg_path),
+        "-x",
+        "-X",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+    ]
+    server = _popen_hidden(
+        server_cmd,
+        cwd=str(Path(exe).parent),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    client_cmd = [
+        str(exe),
+        "-c",
+        str(client_cfg_path),
+        "-x",
+        "-X",
+        "-n",
+        f"127.0.0.1:{game_port}#255",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+        "-r",
+        resolution,
+    ]
+
+    trace_path = run_dir / "coal_trace.jsonl"
+    summary_path = run_dir / "summary.json"
+    client: subprocess.Popen[bytes] | None = None
+    admin = AdminClient("127.0.0.1", admin_port)
+    executed_steps = 0
+    completed = False
+    final_observation: dict[str, Any] | None = None
+    failed = True
+    try:
+        admin.connect()
+        admin.send_gamescript({"type": "observe"})
+        observation = _next_observation(admin, timeout=60.0)
+        final_observation = observation
+        client = subprocess.Popen(
+            client_cmd,
+            cwd=str(Path(exe).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        time.sleep(start_delay)
+        with trace_path.open("a", encoding="utf-8") as trace:
+            trace.write(json.dumps({"event": "initial_observation", "data": observation}) + "\n")
+            for index in range(steps):
+                action = _choose_coal_action(observation, model=model, allow_heuristic=allow_heuristic)
+                trace.write(json.dumps({"event": "action", "step": index + 1, "data": action}) + "\n")
+                admin.send_gamescript({"type": "action", "action": action})
+                result = _next_result(admin, timeout=120.0)
+                observation = _next_observation(admin, timeout=120.0)
+                final_observation = observation
+                executed_steps = index + 1
+                trace.write(json.dumps({"event": "result", "step": index + 1, "data": result}) + "\n")
+                trace.write(json.dumps({"event": "observation", "step": index + 1, "data": observation}) + "\n")
+                completed = _coal_objective_done(observation)
+                if completed:
+                    break
+                time.sleep(step_delay)
+    finally:
+        admin.close()
+
+    final_objective = final_observation.get("active_objective") if final_observation else None
+    summary = {
+        "objective": "first_coal_delivery",
+        "completed": completed,
+        "executed_steps": executed_steps,
+        "requested_steps": steps,
+        "final_tick": final_observation.get("tick") if final_observation else None,
+        "final_bank_balance": final_observation.get("bank_balance") if final_observation else None,
+        "final_objective": final_objective,
+        "trace": str(trace_path),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    launch_info = {
+        "run_dir": str(run_dir),
+        "server_pid": server.pid,
+        "client_pid": client.pid if client is not None else None,
+        "game_port": game_port,
+        "admin_port": admin_port,
+        "model": model,
+        "steps": steps,
+        "trace": str(trace_path),
+        "summary": str(summary_path),
+        "installed": installed,
+        "server_command": server_cmd,
+        "client_command": client_cmd,
+        "note": "The visible client remains open after the coal objective loop finishes.",
+    }
+    (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
+    return launch_info
+
+
+def launch_firs_live(
+    *,
+    workbook: Path | str,
+    executable: str | None = None,
+    openttd_user_dir: Path | str | None = None,
+    output_root: Path | str = "runs_firs",
+    model: str = "gpt-5.5",
+    steps: int = 10,
+    resolution: str = "1280x800",
+    record: bool = False,
+    record_source: str | None = None,
+    repl: bool = False,
+    allow_heuristic: bool = False,
+    start_delay: float = 10.0,
+    step_delay: float = 3.0,
+) -> dict[str, Any]:
+    local_user_dir = _set_openttd_user_dir(openttd_user_dir)
+    workbook_path = Path(workbook)
+    run_config, workbook_meta = read_firs_ops_workbook(workbook_path)
+    exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
+    if not exe or not Path(exe).exists():
+        raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
+    if not os.environ.get("OPENAI_API_KEY") and not allow_heuristic:
+        raise EnvError("OPENAI_API_KEY is required for FIRS GPT play. Use --allow-heuristic for bridge testing.")
+
+    install = verify_firs_installed(local_user_dir)
+    run_dir = _new_run_dir(Path(output_root), suffix="firs_ops")
+    ensure_opengfx()
+    installed = install_live_bridge()
+    game_port = _find_free_port(3979)
+    admin_port = _find_free_port(3977)
+    cfg_text = render_firs_live_config(
+        run_config=run_config,
+        install=install,
+        game_port=game_port,
+        admin_port=admin_port,
+        admin_password=ADMIN_PASSWORD,
+    )
+    artifact_cfg_path = run_dir / "openttd.cfg"
+    artifact_client_cfg_path = run_dir / "openttd-viewer.cfg"
+    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    client_cfg_path = (
+        local_user_dir / f"openttd-le-{run_dir.name}-viewer.cfg" if local_user_dir else artifact_client_cfg_path
+    )
+    cfg_path.write_text(cfg_text, encoding="ascii")
+    client_cfg_text = _with_client_name(cfg_text, f"OpenTTD-LE FIRS Viewer {game_port}")
+    client_cfg_path.write_text(client_cfg_text, encoding="ascii")
+    if cfg_path != artifact_cfg_path:
+        artifact_cfg_path.write_text(cfg_text, encoding="ascii")
+    if client_cfg_path != artifact_client_cfg_path:
+        artifact_client_cfg_path.write_text(client_cfg_text, encoding="ascii")
+
+    server_cmd = [
+        str(exe),
+        "-D",
+        f"0.0.0.0:{game_port}",
+        "-g",
+        "-G",
+        str(run_config.seed),
+        "-c",
+        str(cfg_path),
+        "-x",
+        "-X",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+    ]
+    process_cwd = str(local_user_dir or Path(exe).parent)
+    server = _popen_hidden(
+        server_cmd,
+        cwd=process_cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    client_cmd = [
+        str(exe),
+        "-c",
+        str(client_cfg_path),
+        "-x",
+        "-X",
+        "-n",
+        f"127.0.0.1:{game_port}#255",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+        "-r",
+        resolution,
+    ]
+
+    trace_path = run_dir / "firs_trace.jsonl"
+    summary_path = run_dir / "summary.json"
+    report_path = run_dir / "report.xlsx"
+    gameplay_path = run_dir / "gameplay.mp4"
+    timelapse_path = run_dir / "gameplay_8x.mp4"
+    client: subprocess.Popen[bytes] | None = None
+    recorder: subprocess.Popen[bytes] | None = None
+    admin = AdminClient("127.0.0.1", admin_port)
+    executed_steps = 0
+    completed = False
+    final_observation: dict[str, Any] | None = None
+    failed = True
+    try:
+        admin.connect()
+        admin.send_gamescript({"type": "observe"})
+        observation = _next_observation(admin, timeout=90.0)
+        final_observation = observation
+        client = subprocess.Popen(
+            client_cmd,
+            cwd=process_cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        if record:
+            capture_delay = min(2.0, max(0.0, start_delay))
+            time.sleep(capture_delay)
+            recorder = _start_recording(gameplay_path, source=record_source)
+            time.sleep(max(0.0, start_delay - capture_delay))
+        else:
+            time.sleep(start_delay)
+        repl_session = FIRSReplSession(admin, observation, workbook_meta, run_config.vehicles_per_route) if repl else None
+        with trace_path.open("a", encoding="utf-8") as trace:
+            trace.write(json.dumps({"event": "initial_observation", "data": observation}) + "\n")
+            for index in range(steps):
+                if repl_session is not None:
+                    repl_session.observation = observation
+                    program = _choose_firs_repl_program(
+                        repl_session,
+                        observation,
+                        workbook_meta=workbook_meta,
+                        model=model,
+                        allow_heuristic=allow_heuristic,
+                        vehicles_per_route=run_config.vehicles_per_route,
+                    )
+                    trace.write(json.dumps({"event": "repl_program", "step": index + 1, "data": {"code": program}}) + "\n")
+                    feedback = repl_session.execute(program)
+                    trace.write(
+                        json.dumps(
+                            {
+                                "event": "repl_feedback",
+                                "step": index + 1,
+                                "data": {
+                                    "stdout": feedback.get("stdout", ""),
+                                    "stderr": feedback.get("stderr", ""),
+                                    "actions": len(feedback.get("actions", [])),
+                                },
+                            }
+                        )
+                        + "\n"
+                    )
+                    for executed in feedback.get("actions", []):
+                        trace.write(json.dumps({"event": "action", "step": index + 1, "data": executed["action"]}) + "\n")
+                        trace.write(json.dumps({"event": "result", "step": index + 1, "data": executed["result"]}) + "\n")
+                        trace.write(
+                            json.dumps({"event": "observation", "step": index + 1, "data": executed["observation"]}) + "\n"
+                        )
+                    observation = feedback["observation"]
+                    final_observation = observation
+                    executed_steps = index + 1
+                else:
+                    action = _choose_firs_action(
+                        observation,
+                        workbook_meta=workbook_meta,
+                        model=model,
+                        allow_heuristic=allow_heuristic,
+                        vehicles_per_route=run_config.vehicles_per_route,
+                    )
+                    trace.write(json.dumps({"event": "action", "step": index + 1, "data": action}) + "\n")
+                    admin.send_gamescript({"type": "action", "action": action})
+                    result = _next_result(admin, timeout=180.0)
+                    observation = _next_observation(admin, timeout=180.0)
+                    final_observation = observation
+                    executed_steps = index + 1
+                    trace.write(json.dumps({"event": "result", "step": index + 1, "data": result}) + "\n")
+                    trace.write(json.dumps({"event": "observation", "step": index + 1, "data": observation}) + "\n")
+                completed = _firs_objective_done(observation, workbook_meta)
+                if completed:
+                    break
+                time.sleep(step_delay)
+        failed = False
+    finally:
+        admin.close()
+        if recorder is not None:
+            _stop_recording(recorder)
+            _write_timelapse(gameplay_path, timelapse_path)
+        if failed:
+            _terminate_process(client)
+            _terminate_process(server)
+
+    routes = final_observation.get("routes", []) if final_observation else []
+    route_profit = sum(float(route.get("profit", 0) or route.get("vehicle_profit", 0) or 0) for route in routes)
+    summary = {
+        "objective": "firs_ops_chain",
+        "completed": completed,
+        "executed_steps": executed_steps,
+        "requested_steps": steps,
+        "model": model,
+        "seed": run_config.seed,
+        "economy": run_config.economy,
+        "firs_newgrf": str(install.newgrf_path),
+        "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
+        "final_tick": final_observation.get("tick") if final_observation else None,
+        "final_bank_balance": final_observation.get("bank_balance") if final_observation else None,
+        "route_profit": route_profit,
+        "routes": routes,
+        "trace": str(trace_path),
+        "run_dir": str(run_dir),
+        "workbook": str(workbook_path),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    export_run_to_xlsx(run_dir, report_path, source_workbook=workbook_path)
+
+    launch_info = {
+        "run_dir": str(run_dir),
+        "server_pid": server.pid,
+        "client_pid": client.pid if client is not None else None,
+        "game_port": game_port,
+        "admin_port": admin_port,
+        "model": model,
+        "steps": steps,
+        "trace": str(trace_path),
+        "summary": str(summary_path),
+        "report": str(report_path),
+        "recording": str(gameplay_path) if gameplay_path.exists() else None,
+        "timelapse": str(timelapse_path) if timelapse_path.exists() else None,
+        "record_source": record_source or os.environ.get("OPENTTD_RECORD_SOURCE") or ("title=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")),
+        "repl": repl,
+        "installed": installed,
+        "firs_newgrf": str(install.newgrf_path),
+        "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
+        "server_command": server_cmd,
+        "client_command": client_cmd,
+        "note": "The visible client remains open after the FIRS objective loop finishes.",
+    }
+    (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
+    return launch_info
+
+
+def launch_firs_research(
+    *,
+    workbook: Path | str,
+    executable: str | None = None,
+    openttd_user_dir: Path | str | None = None,
+    output_root: Path | str = "runs_firs_research",
+    model: str = "gpt-5.5",
+    steps: int = 32,
+    allow_heuristic: bool = False,
+    step_delay: float = 0.0,
+) -> dict[str, Any]:
+    local_user_dir = _set_openttd_user_dir(openttd_user_dir)
+    workbook_path = Path(workbook)
+    run_config, workbook_meta = read_firs_ops_workbook(workbook_path)
+    exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
+    if not exe or not Path(exe).exists():
+        raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
+    if not os.environ.get("OPENAI_API_KEY") and not allow_heuristic:
+        raise EnvError("OPENAI_API_KEY is required for FIRS research play. Use --allow-heuristic for bridge testing.")
+
+    install = verify_firs_installed(local_user_dir)
+    run_dir = _new_run_dir(Path(output_root), suffix="firs_research")
+    ensure_opengfx()
+    installed = install_live_bridge()
+    game_port = _find_free_port(3979)
+    admin_port = _find_free_port(3977)
+    cfg_text = render_firs_live_config(
+        run_config=run_config,
+        install=install,
+        game_port=game_port,
+        admin_port=admin_port,
+        admin_password=ADMIN_PASSWORD,
+    )
+    artifact_cfg_path = run_dir / "openttd.cfg"
+    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    cfg_path.write_text(cfg_text, encoding="ascii")
+    if cfg_path != artifact_cfg_path:
+        artifact_cfg_path.write_text(cfg_text, encoding="ascii")
+
+    server_cmd = [
+        str(exe),
+        "-D",
+        f"0.0.0.0:{game_port}",
+        "-g",
+        "-G",
+        str(run_config.seed),
+        "-c",
+        str(cfg_path),
+        "-x",
+        "-X",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+    ]
+    process_cwd = str(local_user_dir or Path(exe).parent)
+    server = _popen_hidden(
+        server_cmd,
+        cwd=process_cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+    trace_path = run_dir / "firs_trace.jsonl"
+    programs_path = run_dir / "programs.jsonl"
+    streams_path = run_dir / "stdout_stderr.jsonl"
+    observations_path = run_dir / "observations.jsonl"
+    rewards_path = run_dir / "rewards.jsonl"
+    actions_path = run_dir / "actions.jsonl"
+    summary_path = run_dir / "summary.json"
+    report_path = run_dir / "report.xlsx"
+
+    admin = AdminClient("127.0.0.1", admin_port)
+    final_observation: dict[str, Any] | None = None
+    completed = False
+    executed_steps = 0
+    total_reward = 0.0
+    previous_snapshot: dict[str, Any] | None = None
+    failed = True
+    try:
+        admin.connect()
+        admin.send_gamescript({"type": "observe"})
+        observation = _next_observation(admin, timeout=90.0)
+        final_observation = observation
+        previous_snapshot = _firs_reward_snapshot(observation, workbook_meta)
+        session = FIRSReplSession(admin, observation, workbook_meta, run_config.vehicles_per_route)
+
+        with (
+            trace_path.open("a", encoding="utf-8") as trace,
+            programs_path.open("a", encoding="utf-8") as programs,
+            streams_path.open("a", encoding="utf-8") as streams,
+            observations_path.open("a", encoding="utf-8") as observations_file,
+            rewards_path.open("a", encoding="utf-8") as rewards_file,
+            actions_path.open("a", encoding="utf-8") as actions_file,
+        ):
+            _write_event(trace, "initial_observation", 0, observation)
+            _write_jsonl(observations_file, {"step": 0, "observation": observation})
+            for index in range(steps):
+                step = index + 1
+                session.observation = observation
+                program = _choose_firs_repl_program(
+                    session,
+                    observation,
+                    workbook_meta=workbook_meta,
+                    model=model,
+                    allow_heuristic=allow_heuristic,
+                    vehicles_per_route=run_config.vehicles_per_route,
+                )
+                _write_jsonl(programs, {"step": step, "program": program})
+                _write_event(trace, "repl_program", step, {"code": program})
+                started = time.time()
+                feedback = session.execute(program)
+                elapsed = time.time() - started
+                _write_jsonl(
+                    streams,
+                    {
+                        "step": step,
+                        "stdout": feedback.get("stdout", ""),
+                        "stderr": feedback.get("stderr", ""),
+                        "elapsed_seconds": round(elapsed, 3),
+                    },
+                )
+                _write_event(
+                    trace,
+                    "repl_feedback",
+                    step,
+                    {
+                        "stdout": feedback.get("stdout", ""),
+                        "stderr": feedback.get("stderr", ""),
+                        "actions": len(feedback.get("actions", [])),
+                    },
+                )
+                for executed in feedback.get("actions", []):
+                    _write_jsonl(actions_file, {"step": step, **executed})
+                    _write_event(trace, "action", step, executed["action"])
+                    _write_event(trace, "result", step, executed["result"])
+                    _write_event(trace, "observation", step, executed["observation"])
+
+                observation = feedback["observation"]
+                final_observation = observation
+                current_snapshot = _firs_reward_snapshot(observation, workbook_meta)
+                reward = _firs_step_reward(previous_snapshot or {}, current_snapshot, feedback.get("actions", []))
+                total_reward += reward["reward"]
+                _write_jsonl(rewards_file, {"step": step, **reward, "snapshot": current_snapshot})
+                _write_jsonl(observations_file, {"step": step, "observation": observation})
+                previous_snapshot = current_snapshot
+                executed_steps = step
+                completed = _firs_objective_done(observation, workbook_meta)
+                if completed:
+                    break
+                if step_delay > 0:
+                    time.sleep(step_delay)
+        failed = False
+    finally:
+        admin.close()
+        _terminate_process(server)
+
+    routes = final_observation.get("routes", []) if final_observation else []
+    route_profit = sum(float(route.get("profit", 0) or route.get("vehicle_profit", 0) or 0) for route in routes)
+    final_snapshot = _firs_reward_snapshot(final_observation or {}, workbook_meta)
+    summary = {
+        "objective": "firs_research_repl",
+        "completed": completed,
+        "failed": failed,
+        "executed_steps": executed_steps,
+        "requested_steps": steps,
+        "model": model,
+        "seed": run_config.seed,
+        "economy": run_config.economy,
+        "firs_newgrf": str(install.newgrf_path),
+        "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
+        "final_tick": final_observation.get("tick") if final_observation else None,
+        "final_bank_balance": final_observation.get("bank_balance") if final_observation else None,
+        "route_profit": route_profit,
+        "total_reward": round(total_reward, 3),
+        "milestones": final_snapshot.get("milestones", {}),
+        "routes": routes,
+        "trace": str(trace_path),
+        "programs": str(programs_path),
+        "stdout_stderr": str(streams_path),
+        "observations": str(observations_path),
+        "rewards": str(rewards_path),
+        "actions": str(actions_path),
+        "run_dir": str(run_dir),
+        "workbook": str(workbook_path),
+        "note": "Research-mode run: headless OpenTTD/FIRS with persistent Python REPL artifacts.",
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    export_run_to_xlsx(run_dir, report_path, source_workbook=workbook_path)
+
+    launch_info = {
+        "run_dir": str(run_dir),
+        "server_pid": server.pid,
+        "game_port": game_port,
+        "admin_port": admin_port,
+        "model": model,
+        "steps": steps,
+        "trace": str(trace_path),
+        "programs": str(programs_path),
+        "stdout_stderr": str(streams_path),
+        "observations": str(observations_path),
+        "rewards": str(rewards_path),
+        "actions": str(actions_path),
+        "summary": str(summary_path),
+        "report": str(report_path),
+        "installed": installed,
+        "firs_newgrf": str(install.newgrf_path),
+        "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
+        "server_command": server_cmd,
+    }
+    (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
+    return launch_info
+
+
+def _choose_action(
+    observation: dict[str, Any],
+    *,
+    model: str,
+    allow_heuristic: bool,
+    focus_town_id: int | None = None,
+) -> dict[str, Any]:
+    towns = observation.get("towns", [])
+    if allow_heuristic:
+        town = next((town for town in towns if town.get("id") == focus_town_id), None)
+        if town is None:
+            index = observation.get("step", 0) % max(1, len(towns))
+            town = towns[index] if towns else {"id": 0, "name": "town"}
+        return {"type": "road_burst", "town_id": town["id"], "label": f"heuristic {town['name']}"}
+
+    model_observation = dict(observation)
+    if focus_town_id is not None:
+        model_observation["visual_focus_town_id"] = focus_town_id
+        model_observation["visual_focus_instruction"] = (
+            "For this live visual demo, choose this town_id for road_burst actions "
+            "unless it is missing from the towns list."
+        )
+
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You are controlling OpenTTD through a live bridge. Return only compact JSON. "
+                    "Allowed actions: "
+                    "{\"type\":\"road_burst\",\"town_id\":123,\"label\":\"short reason\"} or "
+                    "{\"type\":\"sign\",\"town_id\":123,\"text\":\"short note\"}. "
+                    "Prefer road_burst actions that make visible construction fast. "
+                    "If visual_focus_town_id is present in the observation, use that town_id."
+                ),
+            },
+            {"role": "user", "content": json.dumps(model_observation, separators=(",", ":"))},
+        ],
+        "max_output_tokens": 1000,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    text = data.get("output_text") or _extract_response_text(data)
+    if not text.strip():
+        raise EnvError(
+            "Model returned no visible text. "
+            f"status={data.get('status')} incomplete_details={data.get('incomplete_details')}"
+        )
+    return _parse_json(text)
+
+
+def _choose_coal_action(observation: dict[str, Any], *, model: str, allow_heuristic: bool) -> dict[str, Any]:
+    active = observation.get("active_objective")
+    pairs = observation.get("coal_pairs", [])
+    if allow_heuristic:
+        if active:
+            return {"type": "wait", "ticks": 1800, "label": "wait for first coal delivery"}
+        if not pairs:
+            return {"type": "sign", "town_id": 0, "text": "No coal route candidate found"}
+        pair = pairs[0]
+        return {
+            "type": "build_coal_route",
+            "source_id": pair["source_id"],
+            "destination_id": pair["destination_id"],
+            "cargo_id": pair["cargo_id"],
+            "vehicles": 4,
+            "label": "shortest coal route",
+        }
+
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You are playing a live OpenTTD coal-delivery objective. Return only compact JSON. "
+                    "Goal: make the first useful coal delivery and produce profit. "
+                    "If active_objective is null, choose exactly one coal_pairs item and return "
+                    "{\"type\":\"build_coal_route\",\"source_id\":1,\"destination_id\":2,"
+                    "\"cargo_id\":0,\"vehicles\":4,\"label\":\"short reason\"}. "
+                    "Prefer short distance and decent production. "
+                    "If active_objective exists, return {\"type\":\"wait\",\"ticks\":1800,"
+                    "\"label\":\"wait for delivery\"}. "
+                    "Do not build repeated routes unless no active objective exists."
+                ),
+            },
+            {"role": "user", "content": json.dumps(observation, separators=(",", ":"))},
+        ],
+        "max_output_tokens": 1000,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    text = data.get("output_text") or _extract_response_text(data)
+    if not text.strip():
+        raise EnvError(
+            "Model returned no visible text. "
+            f"status={data.get('status')} incomplete_details={data.get('incomplete_details')}"
+        )
+    return _parse_json(text)
+
+
+def _choose_firs_repl_program(
+    session: FIRSReplSession,
+    observation: dict[str, Any],
+    *,
+    workbook_meta: dict[str, Any],
+    model: str,
+    allow_heuristic: bool,
+    vehicles_per_route: int,
+) -> str:
+    if allow_heuristic:
+        return _heuristic_firs_program(session, observation, vehicles_per_route)
+
+    model_observation = {
+        "step": observation.get("step"),
+        "tick": observation.get("tick"),
+        "candidate_routes": session.candidate_routes(),
+        "routes": observation.get("routes", []),
+        "cargo_waiting": observation.get("cargo_waiting", [])[:20],
+        "station_ratings": observation.get("station_ratings", [])[:20],
+        "company_finances": observation.get("company_finances", {}),
+        "workbook": {
+            "scenario": workbook_meta.get("fields", {}),
+            "objectives": workbook_meta.get("objectives", []),
+        },
+        "last_stdout": session.last_stdout[-2000:],
+        "last_stderr": session.last_stderr[-2000:],
+    }
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You are operating OpenTTD/FIRS through a safe persistent Python REPL. "
+                    "Return only Python code, no Markdown. Available variables: obs, routes, "
+                    "candidate_routes, workbook, last_stdout, last_stderr. Available functions: "
+                    "observe(), build_cargo_route(source_id, destination_id, cargo_id, vehicles=5, "
+                    "physical=True, max_path_tiles=40, label=''), add_vehicles(route_id,count), wait_months(months,label=''), "
+                    "inspect_bottlenecks(), borrow_or_repay(amount). Do not import modules. Do not read or "
+                    "write files. Do not use network calls. Use at most one or two game-changing helper calls "
+                    "per program. Print concise diagnostics. If routes is empty and candidate_routes exists, "
+                    "build candidate_routes[0] with physical=True so visible stations, roads, depots, and "
+                    "vehicles are attempted. Keep max_path_tiles at 40 unless you are deliberately testing a "
+                    "short route; long paths return a bounded preview instead of blocking the episode."
+                ),
+            },
+            {"role": "user", "content": json.dumps(model_observation, separators=(",", ":"))},
+        ],
+        "max_output_tokens": 1600,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    text = data.get("output_text") or _extract_response_text(data)
+    code = _strip_code_fence(text).strip()
+    if not code:
+        return _heuristic_firs_program(session, observation, vehicles_per_route)
+    return code
+
+
+def _heuristic_firs_program(
+    session: FIRSReplSession,
+    observation: dict[str, Any],
+    vehicles_per_route: int,
+) -> str:
+    candidates = session.candidate_routes()
+    routes = observation.get("routes", [])
+    if not routes and candidates:
+        return (
+            "route = candidate_routes[0]\n"
+            "print('building physical route', route)\n"
+            "build_cargo_route(route['source_id'], route['destination_id'], route['cargo_id'], "
+            f"vehicles={vehicles_per_route}, physical=True, max_path_tiles=40, label='repl first physical route')"
+        )
+    if routes:
+        return "print('waiting for route progress', routes)\nwait_months(1, label='repl wait for delivery')"
+    return "print('no candidate routes; inspecting')\ninspect_bottlenecks()"
+
+
+def _strip_code_fence(text: str) -> str:
+    fenced = re.search(r"```(?:python|py)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    return fenced.group(1) if fenced else text
+
+
+def _choose_firs_action(
+    observation: dict[str, Any],
+    *,
+    workbook_meta: dict[str, Any],
+    model: str,
+    allow_heuristic: bool,
+    vehicles_per_route: int,
+) -> dict[str, Any]:
+    if allow_heuristic:
+        return _heuristic_firs_action(observation, workbook_meta, vehicles_per_route)
+
+    graph = observation.get("industry_graph", [])
+    routes = observation.get("routes", [])
+    candidate_routes = _candidate_firs_pairs(graph, workbook_meta.get("objectives", []), limit=12)
+    if not candidate_routes:
+        candidate_routes = _candidate_firs_pairs_from_io(observation, workbook_meta.get("objectives", []), limit=12)
+    if routes:
+        candidate_routes = [pair for pair in candidate_routes if not _route_already_registered(pair, routes)]
+        if not candidate_routes:
+            return {"type": "wait_months", "months": 1, "label": "wait for downstream candidate"}
+    model_observation = {
+        "step": observation.get("step"),
+        "tick": observation.get("tick"),
+        "candidate_routes": candidate_routes,
+        "routes": routes,
+        "cargo_waiting": observation.get("cargo_waiting", [])[:20],
+        "station_ratings": observation.get("station_ratings", [])[:20],
+        "company_finances": observation.get("company_finances", {}),
+        "workbook": {
+            "scenario": workbook_meta.get("fields", {}),
+            "objectives": workbook_meta.get("objectives", []),
+        },
+    }
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You are controlling OpenTTD/FIRS through a macro-action bridge. Return only compact JSON. "
+                    "Goal: execute the spreadsheet operations plan, build the dependency chain, inspect bottlenecks, "
+                    "and keep route profit positive. Allowed actions: "
+                    "{\"type\":\"build_cargo_route\",\"source_id\":1,\"destination_id\":2,\"cargo_id\":0,\"vehicles\":5,\"physical\":true,\"label\":\"reason\"}; "
+                    "{\"type\":\"add_vehicles\",\"route_id\":\"route_001\",\"count\":2}; "
+                    "{\"type\":\"wait_months\",\"months\":3,\"label\":\"reason\"}; "
+                    "{\"type\":\"inspect_bottlenecks\"}; "
+                    "{\"type\":\"borrow_or_repay\",\"amount\":50000}. "
+                    "Use only source_id, destination_id, cargo_id, and route_id values present in the observation. "
+                    "Always include physical:true for build_cargo_route so the bridge attempts real stations, roads, depots, and vehicles. "
+                    "If routes is empty and candidate_routes is non-empty, build the first candidate route. "
+                    "Do not inspect bottlenecks repeatedly when no routes exist. "
+                    "If a route has just been built, wait for delivery before building downstream unless the downstream "
+                    "source already appears in candidate_routes."
+                ),
+            },
+            {"role": "user", "content": json.dumps(model_observation, separators=(",", ":"))},
+        ],
+        "max_output_tokens": 2000,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    text = data.get("output_text") or _extract_response_text(data)
+    if not text.strip():
+        if candidate_routes and not routes:
+            return _build_action_from_pair(candidate_routes[0], vehicles_per_route, "fallback spreadsheet candidate")
+        return {"type": "wait_months", "months": 1, "label": "fallback after empty model response"}
+    action = _parse_json(text)
+    if action.get("type") == "build_cargo_route" and candidate_routes:
+        action["physical"] = True
+        exact = any(
+            pair.get("source_id") == action.get("source_id")
+            and pair.get("destination_id") == action.get("destination_id")
+            and pair.get("cargo_id") == action.get("cargo_id")
+            for pair in candidate_routes
+        )
+        if not exact:
+            return _build_action_from_pair(candidate_routes[0], vehicles_per_route, "corrected spreadsheet candidate")
+        if _route_already_registered(action, routes):
+            return {"type": "wait_months", "months": 1, "label": "avoid duplicate route"}
+    return action
+
+
+def _heuristic_firs_action(
+    observation: dict[str, Any],
+    workbook_meta: dict[str, Any],
+    vehicles_per_route: int,
+) -> dict[str, Any]:
+    objectives = workbook_meta.get("objectives", [])
+    routes = observation.get("routes", [])
+    graph = observation.get("industry_graph", [])
+    if not routes:
+        first = objectives[0] if objectives else {}
+        pair = _find_graph_pair(graph, first)
+        if pair is None:
+            pair = graph[0] if graph else None
+        if pair is None:
+            return {"type": "inspect_bottlenecks"}
+        return _build_action_from_pair(pair, vehicles_per_route, "first FIRS chain route")
+
+    if len(routes) == 1:
+        first_route = routes[0]
+        if first_route.get("delivered", 0) <= 0:
+            return {"type": "wait_months", "months": 3, "label": "wait for first delivery"}
+        second = objectives[1] if len(objectives) > 1 else {}
+        pair = _find_graph_pair(graph, second, source_id=first_route.get("destination_id"))
+        if pair is not None:
+            return _build_action_from_pair(pair, vehicles_per_route, "downstream FIRS chain route")
+    waiting_route = _route_needing_capacity(routes)
+    if waiting_route is not None:
+        return {"type": "add_vehicles", "route_id": waiting_route["route_id"], "count": 2}
+    return {"type": "wait_months", "months": 3, "label": "wait for FIRS production"}
+
+
+def _find_graph_pair(
+    graph: list[dict[str, Any]],
+    objective: dict[str, Any],
+    *,
+    source_id: int | None = None,
+) -> dict[str, Any] | None:
+    source_type = str(objective.get("source_type", "")).lower()
+    destination_type = str(objective.get("destination_type", "")).lower()
+    cargo = str(objective.get("cargo", "")).upper()
+    for pair in graph:
+        if source_id is not None and pair.get("source_id") != source_id:
+            continue
+        source_name = str(pair.get("source_type") or pair.get("source_name") or "").lower()
+        destination_name = str(pair.get("destination_type") or pair.get("destination_name") or "").lower()
+        cargo_label = str(pair.get("cargo") or pair.get("cargo_label") or "").upper()
+        if source_type and source_type not in source_name:
+            continue
+        if destination_type and destination_type not in destination_name:
+            continue
+        if cargo and cargo != cargo_label:
+            continue
+        return pair
+    return None
+
+
+def _candidate_firs_pairs(
+    graph: list[dict[str, Any]],
+    objectives: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for objective in objectives:
+        for pair in graph:
+            if not _pair_matches_objective(pair, objective):
+                continue
+            key = (pair.get("source_id"), pair.get("destination_id"), pair.get("cargo_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(pair)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _candidate_firs_pairs_from_io(
+    observation: dict[str, Any],
+    objectives: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    outputs = observation.get("industry_outputs", [])
+    inputs = observation.get("industry_inputs", [])
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for objective in objectives:
+        cargo = str(objective.get("cargo", "")).upper()
+        source_type = str(objective.get("source_type", "")).lower()
+        destination_type = str(objective.get("destination_type", "")).lower()
+        for source in outputs:
+            cargo_label = str(source.get("cargo_label", "")).upper()
+            source_name = str(source.get("industry_name", "")).lower()
+            if cargo and cargo_label != cargo:
+                continue
+            if source_type and source_type not in source_name:
+                continue
+            production = source.get("production", 0)
+            if isinstance(production, (int, float)) and production <= 0:
+                continue
+            for destination in inputs:
+                destination_name = str(destination.get("industry_name", "")).lower()
+                if str(destination.get("cargo_label", "")).upper() != cargo_label:
+                    continue
+                if destination_type and destination_type not in destination_name:
+                    continue
+                key = (source.get("industry_id"), destination.get("industry_id"), source.get("cargo_id"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "source_id": source.get("industry_id"),
+                        "source_name": source.get("industry_name"),
+                        "destination_id": destination.get("industry_id"),
+                        "destination_name": destination.get("industry_name"),
+                        "cargo_id": source.get("cargo_id"),
+                        "cargo_label": cargo_label,
+                        "cargo_name": source.get("cargo_name"),
+                        "production": production,
+                    }
+                )
+                if len(candidates) >= limit:
+                    return candidates
+    return candidates
+
+
+def _route_already_registered(pair: dict[str, Any], routes: list[dict[str, Any]]) -> bool:
+    for route in routes:
+        if (
+            route.get("source_id") == pair.get("source_id")
+            and route.get("destination_id") == pair.get("destination_id")
+            and route.get("cargo_id") == pair.get("cargo_id")
+        ):
+            return True
+    return False
+
+
+def _pair_matches_objective(pair: dict[str, Any], objective: dict[str, Any]) -> bool:
+    source_type = str(objective.get("source_type", "")).lower()
+    destination_type = str(objective.get("destination_type", "")).lower()
+    cargo = str(objective.get("cargo", "")).upper()
+    source_name = str(pair.get("source_type") or pair.get("source_name") or "").lower()
+    destination_name = str(pair.get("destination_type") or pair.get("destination_name") or "").lower()
+    cargo_label = str(pair.get("cargo") or pair.get("cargo_label") or "").upper()
+    if source_type and source_type not in source_name:
+        return False
+    if destination_type and destination_type not in destination_name:
+        return False
+    if cargo and cargo != cargo_label:
+        return False
+    return True
+
+
+def _build_action_from_pair(pair: dict[str, Any], vehicles: int, label: str) -> dict[str, Any]:
+    return {
+        "type": "build_cargo_route",
+        "source_id": pair["source_id"],
+        "destination_id": pair["destination_id"],
+        "cargo_id": pair["cargo_id"],
+        "vehicles": vehicles,
+        "physical": True,
+        "max_path_tiles": 40,
+        "label": label,
+    }
+
+
+def _route_needing_capacity(routes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for route in routes:
+        waiting = route.get("source_waiting", 0)
+        vehicles = route.get("vehicles", 0)
+        if isinstance(waiting, (int, float)) and waiting > 80 and vehicles < 10:
+            return route
+    return None
+
+
+def _coal_objective_done(observation: dict[str, Any]) -> bool:
+    active = observation.get("active_objective") or {}
+    return active.get("delivered", 0) > 0 or active.get("vehicle_profit", 0) > 0
+
+
+def _firs_objective_done(observation: dict[str, Any], workbook_meta: dict[str, Any]) -> bool:
+    objectives = workbook_meta.get("objectives", [])
+    target_count = max(1, min(2, len(objectives)))
+    routes = observation.get("routes", [])
+    delivered = sum(1 for route in routes if route.get("delivered", 0) > 0)
+    profit = sum(float(route.get("profit", 0) or route.get("vehicle_profit", 0) or 0) for route in routes)
+    return delivered >= target_count and profit > 0
+
+
+def _firs_reward_snapshot(observation: dict[str, Any], workbook_meta: dict[str, Any]) -> dict[str, Any]:
+    routes = observation.get("routes", []) or []
+    delivered_total = sum(int(route.get("delivered", 0) or 0) for route in routes)
+    route_profit = sum(float(route.get("profit", 0) or route.get("vehicle_profit", 0) or 0) for route in routes)
+    cargo_labels = sorted({str(route.get("cargo_label", route.get("cargo", ""))) for route in routes if route})
+    delivered_routes = sum(1 for route in routes if int(route.get("delivered", 0) or 0) > 0)
+    processed_targets = {
+        str(item.get("cargo", "")).upper()
+        for item in workbook_meta.get("objectives", [])[1:]
+        if str(item.get("cargo", "")).strip()
+    }
+    delivered_processed = any(
+        str(route.get("cargo_label", "")).upper() in processed_targets and int(route.get("delivered", 0) or 0) > 0
+        for route in routes
+    )
+    failed_station_ratings = sum(
+        1
+        for route in routes
+        if isinstance(route.get("source_rating"), (int, float)) and route.get("source_rating", 0) >= 0 and route.get("source_rating", 0) < 45
+    )
+    production_score = delivered_total + max(0.0, route_profit / 1000.0)
+    milestones = {
+        "first_route": len(routes) > 0,
+        "first_delivery": delivered_routes > 0,
+        "first_processed_delivery": delivered_processed,
+        "positive_network_profit": route_profit > 0,
+        "two_operational_routes": delivered_routes >= 2,
+    }
+    return {
+        "production_score": round(production_score, 3),
+        "delivered_total": delivered_total,
+        "route_profit": round(route_profit, 3),
+        "route_count": len(routes),
+        "delivered_routes": delivered_routes,
+        "cargo_labels": cargo_labels,
+        "low_rating_routes": failed_station_ratings,
+        "milestones": milestones,
+    }
+
+
+def _firs_step_reward(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    previous_milestones = previous.get("milestones", {}) if previous else {}
+    current_milestones = current.get("milestones", {})
+    new_milestones = [
+        key for key, value in current_milestones.items() if value and not bool(previous_milestones.get(key))
+    ]
+    failed_actions = sum(1 for item in actions if item.get("result", {}).get("error"))
+    production_delta = float(current.get("production_score", 0) or 0) - float(previous.get("production_score", 0) or 0)
+    route_delta = int(current.get("route_count", 0) or 0) - int(previous.get("route_count", 0) or 0)
+    reward = production_delta + route_delta * 5.0 + len(new_milestones) * 25.0 - failed_actions * 2.0
+    return {
+        "reward": round(reward, 3),
+        "production_delta": round(production_delta, 3),
+        "new_milestones": new_milestones,
+        "failed_actions": failed_actions,
+    }
+
+
+def _write_event(handle: Any, event: str, step: int, data: dict[str, Any]) -> None:
+    handle.write(json.dumps({"event": event, "step": step, "data": data}, separators=(",", ":")) + "\n")
+    handle.flush()
+
+
+def _write_jsonl(handle: Any, data: dict[str, Any]) -> None:
+    handle.write(json.dumps(data, separators=(",", ":")) + "\n")
+    handle.flush()
+
+
+def _next_observation(admin: AdminClient, timeout: float) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        message = admin.read_gamescript(timeout=deadline - time.time())
+        if message.get("type") == "observation":
+            return message
+    raise EnvError("Timed out waiting for observation.")
+
+
+def _next_result(admin: AdminClient, timeout: float) -> dict[str, Any]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        message = admin.read_gamescript(timeout=deadline - time.time())
+        if message.get("type") == "result":
+            return message
+    raise EnvError("Timed out waiting for action result.")
+
+
+def _live_config(seed: int, game_port: int, admin_port: int) -> str:
+    return f"""[misc]
+graphicsset = OpenGFX
+soundsset = NoSound
+musicset = NoMusic
+display_opt = SHOW_TOWN_NAMES|SHOW_STATION_NAMES|SHOW_SIGNS|FULL_ANIMATION|FULL_DETAIL|WAYPOINTS|SHOW_COMPETITOR_SIGNS
+
+[gui]
+pause_on_newgame = false
+
+[difficulty]
+competitor_start_time = 0
+competitors_interval = 0
+max_no_competitors = 1
+number_towns = 3
+number_industries = 4
+terrain_type = 0
+quantity_sea_lakes = 0
+vehicle_breakdowns = 0
+
+[network]
+server_name = OpenTTD-LE Live GPT
+client_name = OpenTTD-LE Server
+server_port = {game_port}
+server_admin_port = {admin_port}
+admin_password = {ADMIN_PASSWORD}
+allow_insecure_admin_login = true
+server_game_type = local
+server_advertise = false
+server_password =
+default_company_pass =
+max_clients = 4
+max_companies = 15
+max_spectators = 4
+max_init_time = 32000
+max_join_time = 32000
+max_download_time = 32000
+max_lag_time = 32000
+pause_on_join = false
+
+[game_creation]
+generation_seed = {seed}
+map_x = 8
+map_y = 8
+landscape = temperate
+starting_year = 1950
+
+[ai]
+ai_in_multiplayer = true
+ai_disable_veh_roadveh = false
+ai_disable_veh_train = false
+ai_disable_veh_aircraft = true
+ai_disable_veh_ship = true
+
+[script]
+script_max_opcode_till_suspend = 100000
+
+[game_scripts]
+OpenTTDLEGameScript =
+
+[ai_players]
+OpenTTDLECompany = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+none = start_date=1
+"""
+
+
+def _new_run_dir(output_root: Path, *, suffix: str = "live_gpt") -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = output_root.resolve() / f"{timestamp}_{suffix}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def _with_client_name(config_text: str, client_name: str) -> str:
+    replacement = f"client_name = {client_name}"
+    if re.search(r"(?m)^client_name = .*$", config_text):
+        return re.sub(r"(?m)^client_name = .*$", replacement, config_text, count=1)
+    return config_text.replace("[network]\n", f"[network]\n{replacement}\n", 1)
+
+
+def _set_openttd_user_dir(path: Path | str | None) -> Path | None:
+    raw = path if path is not None else os.environ.get("OPENTTD_USER_DIR")
+    if not raw:
+        return None
+    resolved = Path(raw).expanduser().resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    os.environ["OPENTTD_USER_DIR"] = str(resolved)
+    return resolved
+
+
+def _popen_hidden(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return subprocess.Popen(args, **kwargs)
+
+
+def _start_recording(path: Path, *, source: str | None = None) -> subprocess.Popen[bytes] | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    capture_format = "gdigrab" if os.name == "nt" else "x11grab"
+    capture_source = source or os.environ.get("OPENTTD_RECORD_SOURCE")
+    if capture_source is None:
+        capture_source = "title=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")
+    input_args: list[str]
+    if os.name == "nt" and capture_source.startswith("title="):
+        title = capture_source.removeprefix("title=")
+        rect = _wait_window_rect(title)
+        if rect is not None:
+            left, top, right, bottom = rect
+            width = max(2, right - left)
+            height = max(2, bottom - top)
+            if width % 2:
+                width -= 1
+            if height % 2:
+                height -= 1
+            input_args = [
+                "-f",
+                capture_format,
+                "-framerate",
+                "15",
+                "-offset_x",
+                str(left),
+                "-offset_y",
+                str(top),
+                "-video_size",
+                f"{width}x{height}",
+                "-i",
+                "desktop",
+            ]
+        else:
+            return None
+    else:
+        input_args = ["-f", capture_format, "-framerate", "15", "-i", capture_source]
+    command = [
+        ffmpeg,
+        "-y",
+        *input_args,
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(path),
+    ]
+    return _popen_hidden(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE)
+
+
+def _wait_window_rect(title: str, timeout: float = 15.0) -> tuple[int, int, int, int] | None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rect = _find_window_rect(title)
+        if rect is not None:
+            return rect
+        time.sleep(0.25)
+    return None
+
+
+def _find_window_rect(title: str) -> tuple[int, int, int, int] | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    matches: list[int] = []
+
+    def enum_callback(hwnd: int, _lparam: int) -> bool:
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if title in buffer.value:
+            matches.append(hwnd)
+            return False
+        return True
+
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_callback)
+    user32.EnumWindows(callback, 0)
+    if not matches:
+        return None
+    hwnd = matches[0]
+    user32.ShowWindow(hwnd, 9)
+    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
+    user32.SetForegroundWindow(hwnd)
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def _stop_recording(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    if process.stdin is not None:
+        try:
+            process.stdin.write(b"q\n")
+            process.stdin.flush()
+            process.stdin.close()
+            process.wait(timeout=15)
+            return
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+            pass
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _terminate_process(process: subprocess.Popen[bytes] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _write_timelapse(source: Path, target: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not source.exists():
+        return
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+        "-filter:v",
+        "setpts=0.125*PTS",
+        "-an",
+        str(target),
+    ]
+    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def _find_free_port(start: int) -> int:
+    for port in range(start, start + 200):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError:
+                continue
+            return port
+    raise EnvError(f"No free TCP port found from {start}.")
+
+
+def _recv_exact(sock: socket.socket, count: int) -> bytes:
+    chunks = []
+    remaining = count
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise EnvError("Admin socket closed.")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _string(value: str) -> bytes:
+    return value.encode("utf-8") + b"\x00"
+
+
+def _read_string(payload: bytes) -> str:
+    return payload.split(b"\x00", 1)[0].decode("utf-8", "replace")
+
+
+def _extract_response_text(data: dict[str, Any]) -> str:
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"]
+    chunks = []
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if isinstance(content.get("text"), str):
+                chunks.append(content["text"])
+    return "\n".join(chunks)
+
+
+def _parse_json(text: str) -> dict[str, Any]:
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    candidate = fenced.group(1) if fenced else text
+    match = re.search(r"\{[\s\S]*\}", candidate)
+    if not match:
+        raise EnvError(f"Model did not return JSON action: {text}")
+    action = json.loads(match.group(0))
+    if "actions" in action and isinstance(action["actions"], list) and action["actions"]:
+        action = action["actions"][0]
+    elif "action" in action and isinstance(action["action"], dict):
+        action = action["action"]
+    allowed = {
+        "road_burst",
+        "sign",
+        "build_coal_route",
+        "build_cargo_route",
+        "add_vehicles",
+        "wait",
+        "wait_months",
+        "inspect_bottlenecks",
+        "borrow_or_repay",
+    }
+    if action.get("type") not in allowed:
+        raise EnvError(f"Unsupported model action: {action}")
+    return action
