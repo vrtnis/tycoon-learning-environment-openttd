@@ -2001,31 +2001,16 @@ def _start_recording(path: Path, *, source: str | None = None) -> subprocess.Pop
     input_args: list[str]
     if os.name == "nt" and capture_source.startswith("title="):
         title = capture_source.removeprefix("title=")
-        rect = _wait_window_rect(title)
-        if rect is not None:
-            left, top, right, bottom = rect
-            width = max(2, right - left)
-            height = max(2, bottom - top)
-            if width % 2:
-                width -= 1
-            if height % 2:
-                height -= 1
-            input_args = [
-                "-f",
-                capture_format,
-                "-framerate",
-                "15",
-                "-offset_x",
-                str(left),
-                "-offset_y",
-                str(top),
-                "-video_size",
-                f"{width}x{height}",
-                "-i",
-                "desktop",
-            ]
-        else:
+        if _wait_for_window_title(title) is None:
             return None
+        input_args = [
+            "-f",
+            capture_format,
+            "-framerate",
+            "15",
+            "-i",
+            capture_source,
+        ]
     else:
         input_args = ["-f", capture_format, "-framerate", "15", "-i", capture_source]
     command = [
@@ -2043,24 +2028,24 @@ def _start_recording(path: Path, *, source: str | None = None) -> subprocess.Pop
     return _popen_hidden(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE)
 
 
-def _wait_window_rect(title: str, timeout: float = 15.0) -> tuple[int, int, int, int] | None:
+def _wait_for_window_title(title: str, timeout: float = 15.0) -> str | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        rect = _find_window_rect(title)
-        if rect is not None:
-            return rect
+        match = _find_window_title(title)
+        if match is not None:
+            return match
         time.sleep(0.25)
     return None
 
 
-def _find_window_rect(title: str) -> tuple[int, int, int, int] | None:
+def _find_window_title(title: str) -> str | None:
     if os.name != "nt":
         return None
     import ctypes
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
-    matches: list[int] = []
+    matches: list[str] = []
 
     def enum_callback(hwnd: int, _lparam: int) -> bool:
         length = user32.GetWindowTextLengthW(hwnd)
@@ -2069,22 +2054,13 @@ def _find_window_rect(title: str) -> tuple[int, int, int, int] | None:
         buffer = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         if title in buffer.value:
-            matches.append(hwnd)
+            matches.append(buffer.value)
             return False
         return True
 
     callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_callback)
     user32.EnumWindows(callback, 0)
-    if not matches:
-        return None
-    hwnd = matches[0]
-    user32.ShowWindow(hwnd, 9)
-    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
-    user32.SetForegroundWindow(hwnd)
-    rect = wintypes.RECT()
-    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-        return None
-    return rect.left, rect.top, rect.right, rect.bottom
+    return matches[0] if matches else None
 
 
 def _stop_recording(process: subprocess.Popen[bytes]) -> None:
