@@ -163,14 +163,27 @@ For FLE-style research runs, use the headless REPL benchmark command:
 ```bash
 $env:OPENAI_API_KEY="..."
 openttd-le firs-research-run --workbook scenario.xlsx --model gpt-5.5 --steps 32 --openttd-user-dir .openttd
+openttd-le firs-research-run --workbook scenario.xlsx --task lab_supply_mine_short --steps 8 --openttd-user-dir .openttd
 ```
 
 One research step is one generated Python program executed in a persistent
 namespace. The exposed API is deliberately high-level: `observe()`,
 `build_cargo_route()`, `add_vehicles()`, `wait_months()`,
-`inspect_bottlenecks()`, and `borrow_or_repay()`. The benchmark writes separate
-JSONL artifacts for programs, stdout/stderr, observations, actions, and rewards
-so model comparisons do not depend on video recording.
+`inspect_bottlenecks()`, `borrow_or_repay()`, typed `cargo_chains`,
+`industries`, `finance`, and a small `Prototype` namespace. The benchmark writes
+separate JSONL artifacts for programs, stdout/stderr, observations, actions, and
+rewards so model comparisons do not depend on video recording. Research mode can
+fall back to explicitly marked `python_virtual_operational_route` routes when
+OpenTTD cannot place physical stations; those routes make the REPL/reward loop
+stable while physical construction is improved separately.
+
+Batch model/task comparisons use:
+
+```bash
+openttd-le firs-benchmark --workbook scenario.xlsx --tasks lab_supply_mine_short --models gpt-5.5 --repeats 3 --openttd-user-dir .openttd
+```
+
+Benchmark task definitions live in `scenarios/firs_benchmarks.json`.
 
 Artifacts are written under `runs_firs/<timestamp>_firs_ops/`, including
 `firs_trace.jsonl`, `summary.json`, `launch.json`, `report.xlsx`, the run-specific

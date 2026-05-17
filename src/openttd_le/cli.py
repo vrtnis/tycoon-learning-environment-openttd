@@ -8,7 +8,13 @@ from typing import Any
 from openttd_le import __version__
 from openttd_le.agents import make_agent
 from openttd_le.backends.firs import load_firs_config
-from openttd_le.backends.live import launch_coal_objective, launch_firs_live, launch_firs_research, launch_gpt_live
+from openttd_le.backends.live import (
+    launch_coal_objective,
+    launch_firs_benchmark,
+    launch_firs_live,
+    launch_firs_research,
+    launch_gpt_live,
+)
 from openttd_le.backends.openttd import OpenTTDBackend
 from openttd_le.backends.visual import install_bridge, launch_watch_game
 from openttd_le.core.artifacts import RunArtifacts
@@ -142,12 +148,28 @@ def main(argv: list[str] | None = None) -> int:
     firs_research_parser.add_argument("--out", default="runs_firs_research")
     firs_research_parser.add_argument("--steps", type=int, default=32)
     firs_research_parser.add_argument("--model", default="gpt-5.5")
+    firs_research_parser.add_argument("--task", default=None, help="Benchmark task id from scenarios/firs_benchmarks.json.")
+    firs_research_parser.add_argument("--benchmark-file", default=None)
     firs_research_parser.add_argument("--step-delay", type=float, default=0.0)
     firs_research_parser.add_argument(
         "--allow-heuristic",
         action="store_true",
         help="Use a deterministic local policy when OPENAI_API_KEY is unavailable.",
     )
+
+    firs_benchmark_parser = subparsers.add_parser(
+        "firs-benchmark",
+        help="Run FIRS research tasks across models/repeats and aggregate results.",
+    )
+    firs_benchmark_parser.add_argument("--workbook", required=True)
+    firs_benchmark_parser.add_argument("--executable", default=None)
+    firs_benchmark_parser.add_argument("--openttd-user-dir", default=None)
+    firs_benchmark_parser.add_argument("--out", default="runs_firs_benchmark")
+    firs_benchmark_parser.add_argument("--models", default="gpt-5.5", help="Comma-separated model names.")
+    firs_benchmark_parser.add_argument("--tasks", default=None, help="Comma-separated task ids. Defaults to all tasks.")
+    firs_benchmark_parser.add_argument("--repeats", type=int, default=1)
+    firs_benchmark_parser.add_argument("--benchmark-file", default=None)
+    firs_benchmark_parser.add_argument("--allow-heuristic", action="store_true")
 
     export_parser = subparsers.add_parser("export-xlsx", help="Export a run directory to a FIRS Excel report.")
     export_parser.add_argument("--run", required=True)
@@ -246,8 +268,24 @@ def main(argv: list[str] | None = None) -> int:
             output_root=Path(args.out),
             steps=args.steps,
             model=args.model,
+            benchmark_task=args.task,
+            benchmark_file=Path(args.benchmark_file) if args.benchmark_file else None,
             allow_heuristic=args.allow_heuristic,
             step_delay=args.step_delay,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.command == "firs-benchmark":
+        payload = launch_firs_benchmark(
+            workbook=Path(args.workbook),
+            executable=args.executable,
+            openttd_user_dir=Path(args.openttd_user_dir) if args.openttd_user_dir else None,
+            output_root=Path(args.out),
+            models=[item.strip() for item in args.models.split(",") if item.strip()],
+            tasks=[item.strip() for item in args.tasks.split(",") if item.strip()] if args.tasks else None,
+            repeats=args.repeats,
+            benchmark_file=Path(args.benchmark_file) if args.benchmark_file else None,
+            allow_heuristic=args.allow_heuristic,
         )
         print(json.dumps(payload, indent=2))
         return 0

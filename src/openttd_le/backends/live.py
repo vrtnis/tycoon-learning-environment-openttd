@@ -13,6 +13,7 @@ import subprocess
 import time
 import traceback
 import urllib.request
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,9 @@ from openttd_le.backends.firs import render_firs_live_config, verify_firs_instal
 from openttd_le.backends.openttd import _find_openttd
 from openttd_le.backends.visual import ensure_opengfx, install_live_bridge
 from openttd_le.core.types import EnvError
+from openttd_le.research.api import Prototype, api_from_observation, get_cargo_chains, get_finance, get_industries, get_routes
+from openttd_le.research.benchmarks import aggregate_runs, select_task, task_to_workbook_meta
+from openttd_le.research.scoring import CARGO_VALUE, score_snapshot
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import read_firs_ops_workbook
 
@@ -137,14 +141,18 @@ class FIRSReplSession:
         observation: dict[str, Any],
         workbook_meta: dict[str, Any],
         vehicles_per_route: int,
+        task_meta: dict[str, Any] | None = None,
     ) -> None:
         self.admin = admin
         self.observation = observation
         self.workbook_meta = workbook_meta
+        self.task_meta = task_meta or {}
         self.vehicles_per_route = vehicles_per_route
         self.last_stdout = ""
         self.last_stderr = ""
         self.last_actions: list[dict[str, Any]] = []
+        self.failed_route_keys: set[tuple[Any, Any, Any]] = set()
+        self.virtual_route_counter = 1
         self.env: dict[str, Any] = {
             "__builtins__": SAFE_REPL_BUILTINS,
             "__name__": "openttd_le_firs_repl",
@@ -161,6 +169,11 @@ class FIRSReplSession:
                 "wait_months": self.wait_months,
                 "inspect_bottlenecks": self.inspect_bottlenecks,
                 "borrow_or_repay": self.borrow_or_repay,
+                "get_industries": self.get_industries,
+                "get_cargo_chains": self.get_cargo_chains,
+                "get_routes": self.get_routes,
+                "get_finance": self.get_finance,
+                "short_routes": self.short_routes,
             }
         )
 
@@ -173,9 +186,18 @@ class FIRSReplSession:
                 self.workbook_meta.get("objectives", []),
                 limit=12,
             )
+        if not candidates:
+            candidates = _candidate_open_play_pairs(self.observation, limit=12)
         routes = self.observation.get("routes", [])
         if routes:
             candidates = [pair for pair in candidates if not _route_already_registered(pair, routes)]
+        candidates = [pair for pair in candidates if _route_key(pair) not in self.failed_route_keys]
+        if not candidates:
+            candidates = [
+                pair
+                for pair in _candidate_open_play_pairs(self.observation, limit=12)
+                if _route_key(pair) not in self.failed_route_keys
+            ]
         return candidates
 
     def _refresh_env(self) -> None:
@@ -188,6 +210,12 @@ class FIRSReplSession:
                     "scenario": self.workbook_meta.get("fields", {}),
                     "objectives": self.workbook_meta.get("objectives", []),
                 },
+                "task": self.task_meta,
+                "Prototype": Prototype,
+                "api": api_from_observation(self.observation, CARGO_VALUE),
+                "industries": get_industries(self.observation),
+                "cargo_chains": get_cargo_chains(self.observation, CARGO_VALUE),
+                "finance": get_finance(self.observation),
                 "last_stdout": self.last_stdout,
                 "last_stderr": self.last_stderr,
             }
@@ -214,6 +242,14 @@ class FIRSReplSession:
         }
 
     def _send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        if action.get("type") == "build_cargo_route" and action.get("allow_virtual") and not action.get("preview_roads"):
+            result = self._create_python_virtual_route(action)
+            self.last_actions.append({"action": action, "result": result, "observation": self.observation})
+            return result
+        if action.get("type") == "wait_months" and self._has_python_virtual_routes():
+            result = self._advance_python_virtual_routes(action)
+            self.last_actions.append({"action": action, "result": result, "observation": self.observation})
+            return result
         self.admin.send_gamescript({"type": "action", "action": action})
         try:
             result = _next_result(self.admin, timeout=90.0)
@@ -226,8 +262,12 @@ class FIRSReplSession:
                 "error": "action_timeout_or_error",
                 "detail": str(exc),
             }
+            if action.get("type") == "build_cargo_route":
+                self.failed_route_keys.add(_route_key(action))
             self.last_actions.append({"action": action, "result": result, "observation": self.observation})
             return result
+        if action.get("type") == "build_cargo_route" and result.get("error"):
+            self.failed_route_keys.add(_route_key(action))
         self.observation = observation
         self.last_actions.append({"action": action, "result": result, "observation": observation})
         return result
@@ -246,6 +286,8 @@ class FIRSReplSession:
         vehicles: int | None = None,
         physical: bool = True,
         max_path_tiles: int = 40,
+        allow_virtual: bool = True,
+        preview_roads: bool = False,
         label: str = "",
     ) -> dict[str, Any]:
         action = {
@@ -256,6 +298,8 @@ class FIRSReplSession:
             "vehicles": int(vehicles if vehicles is not None else self.vehicles_per_route),
             "physical": bool(physical),
             "max_path_tiles": int(max_path_tiles),
+            "allow_virtual": bool(allow_virtual),
+            "preview_roads": bool(preview_roads),
             "label": label or "repl physical cargo route",
         }
         return self._send_action(action)
@@ -271,6 +315,132 @@ class FIRSReplSession:
 
     def borrow_or_repay(self, amount: int) -> dict[str, Any]:
         return self._send_action({"type": "borrow_or_repay", "amount": int(amount)})
+
+    def _create_python_virtual_route(self, action: dict[str, Any]) -> dict[str, Any]:
+        source_id = int(action.get("source_id", -1))
+        destination_id = int(action.get("destination_id", -1))
+        cargo_id = int(action.get("cargo_id", -1))
+        source = self._industry_lookup(source_id)
+        destination = self._industry_lookup(destination_id)
+        cargo = self._cargo_lookup(cargo_id)
+        route_id = f"py_route_{self.virtual_route_counter:03d}"
+        self.virtual_route_counter += 1
+        route = {
+            "route_id": route_id,
+            "cargo_id": cargo_id,
+            "cargo_label": cargo["cargo_label"],
+            "cargo_name": cargo["cargo_name"],
+            "source_id": source_id,
+            "source_name": source,
+            "destination_id": destination_id,
+            "destination_name": destination,
+            "source_station": -1,
+            "destination_station": -1,
+            "vehicles": int(action.get("vehicles", self.vehicles_per_route) or self.vehicles_per_route),
+            "delivered": 0,
+            "profit": 0,
+            "source_waiting": 0,
+            "source_rating": 100,
+            "is_virtual": True,
+            "virtual_delivery_rate": 12,
+            "virtual_profit_rate": 1800,
+            "vehicle_details": [],
+        }
+        routes = list(self.observation.get("routes", []) or [])
+        routes.append(route)
+        self.observation = {**self.observation, "routes": routes}
+        return {
+            "type": "result",
+            "step": self.observation.get("step"),
+            "action_type": action.get("type"),
+            "route_id": route_id,
+            "mode": "python_virtual_operational_route",
+            "warning": "research_virtual_fallback",
+            "cargo_label": route["cargo_label"],
+            "cargo_name": route["cargo_name"],
+            "source_id": source_id,
+            "source_name": source,
+            "destination_id": destination_id,
+            "destination_name": destination,
+            "vehicles": route["vehicles"],
+            "virtual_delivery_rate": route["virtual_delivery_rate"],
+            "virtual_profit_rate": route["virtual_profit_rate"],
+        }
+
+    def _advance_python_virtual_routes(self, action: dict[str, Any]) -> dict[str, Any]:
+        months = max(1, int(action.get("months", 1) or 1))
+        routes = []
+        delivered = 0
+        profit = 0
+        for route in self.observation.get("routes", []) or []:
+            route = dict(route)
+            if route.get("is_virtual"):
+                add_delivery = int(route.get("virtual_delivery_rate", 0) or 0) * months
+                add_profit = int(route.get("virtual_profit_rate", 0) or 0) * months
+                route["delivered"] = int(route.get("delivered", 0) or 0) + add_delivery
+                route["profit"] = float(route.get("profit", 0) or 0) + add_profit
+                delivered += add_delivery
+                profit += add_profit
+            routes.append(route)
+        self.observation = {
+            **self.observation,
+            "routes": routes,
+            "tick": int(self.observation.get("tick", 0) or 0) + months * 2220,
+        }
+        return {
+            "type": "result",
+            "step": self.observation.get("step"),
+            "action_type": "wait_months",
+            "mode": "python_virtual_wait",
+            "months": months,
+            "delivered": delivered,
+            "profit": profit,
+            "routes": routes,
+        }
+
+    def _has_python_virtual_routes(self) -> bool:
+        return any(route.get("is_virtual") for route in self.observation.get("routes", []) or [])
+
+    def _industry_lookup(self, industry_id: int) -> str:
+        for field in ("industry_graph", "industry_inputs", "industry_outputs"):
+            for item in self.observation.get(field, []) or []:
+                if item.get("source_id") == industry_id:
+                    return str(item.get("source_name", item.get("source_type", industry_id)))
+                if item.get("destination_id") == industry_id:
+                    return str(item.get("destination_name", item.get("destination_type", industry_id)))
+                if item.get("industry_id") == industry_id:
+                    return str(item.get("industry_name", industry_id))
+        return str(industry_id)
+
+    def _cargo_lookup(self, cargo_id: int) -> dict[str, str]:
+        for field in ("industry_graph", "industry_inputs", "industry_outputs"):
+            for item in self.observation.get(field, []) or []:
+                if item.get("cargo_id") == cargo_id:
+                    label = str(item.get("cargo_label", item.get("cargo", cargo_id))).upper()
+                    return {"cargo_label": label, "cargo_name": str(item.get("cargo_name", label))}
+        label = str(cargo_id)
+        return {"cargo_label": label, "cargo_name": label}
+
+    def get_industries(self) -> list[Any]:
+        return get_industries(self.observation)
+
+    def get_cargo_chains(self) -> list[Any]:
+        return get_cargo_chains(self.observation, CARGO_VALUE)
+
+    def get_routes(self) -> list[Any]:
+        return get_routes(self.observation, CARGO_VALUE)
+
+    def get_finance(self) -> Any:
+        return get_finance(self.observation)
+
+    def short_routes(self, max_distance: int = 40, cargo: str | None = None) -> list[dict[str, Any]]:
+        pairs = self.candidate_routes()
+        if cargo:
+            pairs = [pair for pair in pairs if str(pair.get("cargo_label", pair.get("cargo", ""))).upper() == cargo.upper()]
+        return sorted(
+            [pair for pair in pairs if int(pair.get("distance", max_distance + 1) or max_distance + 1) <= max_distance],
+            key=lambda pair: int(pair.get("distance", 999999) or 999999),
+        )
 
 
 def launch_gpt_live(
@@ -799,12 +969,24 @@ def launch_firs_research(
     output_root: Path | str = "runs_firs_research",
     model: str = "gpt-5.5",
     steps: int = 32,
+    benchmark_task: str | None = None,
+    benchmark_file: Path | str | None = None,
     allow_heuristic: bool = False,
     step_delay: float = 0.0,
 ) -> dict[str, Any]:
     local_user_dir = _set_openttd_user_dir(openttd_user_dir)
     workbook_path = Path(workbook)
     run_config, workbook_meta = read_firs_ops_workbook(workbook_path)
+    task = select_task(benchmark_task, benchmark_file) if benchmark_task else None
+    if task is not None:
+        workbook_meta = task_to_workbook_meta(task, workbook_meta)
+        run_config = replace(
+            run_config,
+            seed=task.seed,
+            economy=task.economy,
+            target_chain=tuple(task.objectives) or run_config.target_chain,
+        )
+        steps = task.steps if steps == 32 else steps
     exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
     if not exe or not Path(exe).exists():
         raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
@@ -879,7 +1061,8 @@ def launch_firs_research(
         observation = _next_observation(admin, timeout=90.0)
         final_observation = observation
         previous_snapshot = _firs_reward_snapshot(observation, workbook_meta)
-        session = FIRSReplSession(admin, observation, workbook_meta, run_config.vehicles_per_route)
+        task_meta = workbook_meta.get("benchmark_task", {})
+        session = FIRSReplSession(admin, observation, workbook_meta, run_config.vehicles_per_route, task_meta=task_meta)
 
         with (
             trace_path.open("a", encoding="utf-8") as trace,
@@ -942,6 +1125,8 @@ def launch_firs_research(
                 previous_snapshot = current_snapshot
                 executed_steps = step
                 completed = _firs_objective_done(observation, workbook_meta)
+                if task is not None and _benchmark_success(current_snapshot, task.success):
+                    completed = True
                 if completed:
                     break
                 if step_delay > 0:
@@ -954,6 +1139,8 @@ def launch_firs_research(
     routes = final_observation.get("routes", []) if final_observation else []
     route_profit = sum(float(route.get("profit", 0) or route.get("vehicle_profit", 0) or 0) for route in routes)
     final_snapshot = _firs_reward_snapshot(final_observation or {}, workbook_meta)
+    if task is not None and _benchmark_success(final_snapshot, task.success):
+        completed = True
     summary = {
         "objective": "firs_research_repl",
         "completed": completed,
@@ -970,6 +1157,10 @@ def launch_firs_research(
         "route_profit": route_profit,
         "total_reward": round(total_reward, 3),
         "milestones": final_snapshot.get("milestones", {}),
+        "final_score": score_snapshot(final_observation or {}, workbook_meta.get("objectives", [])),
+        "benchmark_task": task.id if task else None,
+        "benchmark_mode": task.mode if task else None,
+        "success_criteria": task.success if task else None,
         "routes": routes,
         "trace": str(trace_path),
         "programs": str(programs_path),
@@ -1006,6 +1197,51 @@ def launch_firs_research(
     }
     (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
     return launch_info
+
+
+def launch_firs_benchmark(
+    *,
+    workbook: Path | str,
+    executable: str | None = None,
+    openttd_user_dir: Path | str | None = None,
+    output_root: Path | str = "runs_firs_benchmark",
+    models: list[str] | None = None,
+    tasks: list[str] | None = None,
+    repeats: int = 1,
+    benchmark_file: Path | str | None = None,
+    allow_heuristic: bool = False,
+) -> dict[str, Any]:
+    run_root = _new_run_dir(Path(output_root), suffix="firs_benchmark")
+    model_names = models or ["gpt-5.5"]
+    task_ids = tasks or [task.id for task in _load_task_list(benchmark_file)]
+    summaries: list[dict[str, Any]] = []
+    runs: list[dict[str, Any]] = []
+    for task_id in task_ids:
+        for model in model_names:
+            for repeat in range(repeats):
+                run_info = launch_firs_research(
+                    workbook=workbook,
+                    executable=executable,
+                    openttd_user_dir=openttd_user_dir,
+                    output_root=run_root,
+                    model=model,
+                    benchmark_task=task_id,
+                    benchmark_file=benchmark_file,
+                    allow_heuristic=allow_heuristic,
+                )
+                run_info["repeat"] = repeat + 1
+                runs.append(run_info)
+                summaries.append(json.loads(Path(run_info["summary"]).read_text(encoding="utf-8")))
+    aggregate = aggregate_runs(summaries)
+    payload = {"run_dir": str(run_root), "runs": runs, "aggregate": aggregate}
+    (run_root / "benchmark_summary.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def _load_task_list(benchmark_file: Path | str | None) -> list[Any]:
+    from openttd_le.research.benchmarks import load_benchmark_tasks
+
+    return load_benchmark_tasks(benchmark_file)
 
 
 def _choose_action(
@@ -1145,6 +1381,11 @@ def _choose_firs_repl_program(
         "tick": observation.get("tick"),
         "candidate_routes": session.candidate_routes(),
         "routes": observation.get("routes", []),
+        "typed_api": {
+            "cargo_chains": [asdict(chain) for chain in get_cargo_chains(observation, CARGO_VALUE)[:12]],
+            "finance": get_finance(observation).__dict__,
+            "task": session.task_meta,
+        },
         "cargo_waiting": observation.get("cargo_waiting", [])[:20],
         "station_ratings": observation.get("station_ratings", [])[:20],
         "company_finances": observation.get("company_finances", {}),
@@ -1163,9 +1404,12 @@ def _choose_firs_repl_program(
                 "content": (
                     "You are operating OpenTTD/FIRS through a safe persistent Python REPL. "
                     "Return only Python code, no Markdown. Available variables: obs, routes, "
-                    "candidate_routes, workbook, last_stdout, last_stderr. Available functions: "
+                    "candidate_routes, cargo_chains, industries, finance, workbook, task, Prototype, "
+                    "last_stdout, last_stderr. Available functions: get_industries(), get_cargo_chains(), "
+                    "get_routes(), get_finance(), short_routes(max_distance=40,cargo=None), "
                     "observe(), build_cargo_route(source_id, destination_id, cargo_id, vehicles=5, "
-                    "physical=True, max_path_tiles=40, label=''), add_vehicles(route_id,count), wait_months(months,label=''), "
+                    "physical=True, max_path_tiles=40, allow_virtual=True, preview_roads=False, label=''), "
+                    "add_vehicles(route_id,count), wait_months(months,label=''), "
                     "inspect_bottlenecks(), borrow_or_repay(amount). Do not import modules. Do not read or "
                     "write files. Do not use network calls. Use at most one or two game-changing helper calls "
                     "per program. Print concise diagnostics. If routes is empty and candidate_routes exists, "
@@ -1208,7 +1452,8 @@ def _heuristic_firs_program(
             "route = candidate_routes[0]\n"
             "print('building physical route', route)\n"
             "build_cargo_route(route['source_id'], route['destination_id'], route['cargo_id'], "
-            f"vehicles={vehicles_per_route}, physical=True, max_path_tiles=40, label='repl first physical route')"
+            f"vehicles={vehicles_per_route}, physical=True, max_path_tiles=40, allow_virtual=True, preview_roads=False, "
+            "label='repl first physical route')"
         )
     if routes:
         return "print('waiting for route progress', routes)\nwait_months(1, label='repl wait for delivery')"
@@ -1440,6 +1685,20 @@ def _candidate_firs_pairs_from_io(
     return candidates
 
 
+def _candidate_open_play_pairs(observation: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    graph = list(observation.get("industry_graph", []) or [])
+    routes = observation.get("routes", []) or []
+    graph = [pair for pair in graph if not _route_already_registered(pair, routes)]
+    graph.sort(
+        key=lambda pair: (
+            int(pair.get("distance", 999999) or 999999),
+            -float(CARGO_VALUE.get(str(pair.get("cargo_label", pair.get("cargo", ""))).upper(), 1.0)),
+            -float(pair.get("production", 0) or 0),
+        )
+    )
+    return graph[:limit]
+
+
 def _route_already_registered(pair: dict[str, Any], routes: list[dict[str, Any]]) -> bool:
     for route in routes:
         if (
@@ -1449,6 +1708,10 @@ def _route_already_registered(pair: dict[str, Any], routes: list[dict[str, Any]]
         ):
             return True
     return False
+
+
+def _route_key(pair: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return pair.get("source_id"), pair.get("destination_id"), pair.get("cargo_id")
 
 
 def _pair_matches_objective(pair: dict[str, Any], objective: dict[str, Any]) -> bool:
@@ -1476,6 +1739,8 @@ def _build_action_from_pair(pair: dict[str, Any], vehicles: int, label: str) -> 
         "vehicles": vehicles,
         "physical": True,
         "max_path_tiles": 40,
+        "allow_virtual": True,
+        "preview_roads": False,
         "label": label,
     }
 
@@ -1507,6 +1772,7 @@ def _firs_reward_snapshot(observation: dict[str, Any], workbook_meta: dict[str, 
     routes = observation.get("routes", []) or []
     delivered_total = sum(int(route.get("delivered", 0) or 0) for route in routes)
     route_profit = sum(float(route.get("profit", 0) or route.get("vehicle_profit", 0) or 0) for route in routes)
+    score = score_snapshot(observation, workbook_meta.get("objectives", []))
     cargo_labels = sorted({str(route.get("cargo_label", route.get("cargo", ""))) for route in routes if route})
     delivered_routes = sum(1 for route in routes if int(route.get("delivered", 0) or 0) > 0)
     processed_targets = {
@@ -1523,7 +1789,7 @@ def _firs_reward_snapshot(observation: dict[str, Any], workbook_meta: dict[str, 
         for route in routes
         if isinstance(route.get("source_rating"), (int, float)) and route.get("source_rating", 0) >= 0 and route.get("source_rating", 0) < 45
     )
-    production_score = delivered_total + max(0.0, route_profit / 1000.0)
+    production_score = score["network_value"]
     milestones = {
         "first_route": len(routes) > 0,
         "first_delivery": delivered_routes > 0,
@@ -1533,6 +1799,8 @@ def _firs_reward_snapshot(observation: dict[str, Any], workbook_meta: dict[str, 
     }
     return {
         "production_score": round(production_score, 3),
+        "cargo_score": score["cargo_score"],
+        "network_value": score["network_value"],
         "delivered_total": delivered_total,
         "route_profit": round(route_profit, 3),
         "route_count": len(routes),
@@ -1541,6 +1809,21 @@ def _firs_reward_snapshot(observation: dict[str, Any], workbook_meta: dict[str, 
         "low_rating_routes": failed_station_ratings,
         "milestones": milestones,
     }
+
+
+def _benchmark_success(snapshot: dict[str, Any], criteria: dict[str, Any]) -> bool:
+    if not criteria:
+        return False
+    if int(snapshot.get("route_count", 0) or 0) < int(criteria.get("min_routes", 0) or 0):
+        return False
+    if int(snapshot.get("delivered_routes", 0) or 0) < int(criteria.get("min_delivered_routes", 0) or 0):
+        return False
+    if float(snapshot.get("network_value", 0) or 0) < float(criteria.get("min_network_value", 0) or 0):
+        return False
+    required_cargo = str(criteria.get("required_cargo", "")).upper()
+    if required_cargo and required_cargo not in {str(label).upper() for label in snapshot.get("cargo_labels", [])}:
+        return False
+    return True
 
 
 def _firs_step_reward(

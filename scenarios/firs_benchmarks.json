@@ -1,0 +1,67 @@
+{
+  "tasks": [
+    {
+      "id": "lab_supply_mine_short",
+      "mode": "lab",
+      "description": "Build a short operational supply route into a primary industry.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 8,
+      "prompt": "Prefer the shortest candidate that can become an operational route. Complete one Engineering Supplies delivery route if available.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "min_network_value": 5
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Port",
+          "destination_type": "Coal Mine",
+          "cargo": "ENSP",
+          "deadline_year": 3,
+          "required_delivered": 1,
+          "weight": 100
+        }
+      ]
+    },
+    {
+      "id": "lab_raw_to_processor",
+      "mode": "lab",
+      "description": "Connect a raw material producer to its first processor.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 16,
+      "prompt": "Build a coal route to the steel mill, then wait for route progress.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "required_cargo": "COAL"
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Coal Mine",
+          "destination_type": "Steel Mill",
+          "cargo": "COAL",
+          "deadline_year": 3,
+          "required_delivered": 1,
+          "weight": 100
+        }
+      ]
+    },
+    {
+      "id": "open_play_network_value",
+      "mode": "open",
+      "description": "Maximize delivered cargo value, network profit, and milestones over the step budget.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 64,
+      "prompt": "Build the highest-value logistics network possible. Prefer short operational routes first, then expand to higher-value cargo chains.",
+      "success": {
+        "min_network_value": 25
+      },
+      "objectives": []
+    }
+  ]
+}

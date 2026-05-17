@@ -22,6 +22,7 @@ class OpenTTDLEGameScript extends GSController {
     function IndustryCargoInputs(limit);
     function IndustryCargoOutputs(limit);
     function ExecuteCoalRoute(action);
+    function CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, delivery_rate, profit_rate);
     function ExecuteCargoRoute(action, action_type);
     function ExecuteAddVehicles(action);
     function ExecuteInspectBottlenecks();
@@ -415,10 +416,11 @@ function OpenTTDLEGameScript::RouteSummaries()
             destination_station = route.destination_station,
             vehicles = route.vehicles.len(),
             delivered = route.delivered,
-            profit = this.SumRouteVehicleProfit(route),
+            profit = route.rawin("is_virtual") && route.is_virtual ? route.profit : this.SumRouteVehicleProfit(route),
             source_waiting = source_waiting,
             destination_waiting = destination_waiting,
             source_rating = source_rating,
+            is_virtual = route.rawin("is_virtual") && route.is_virtual,
             vehicle_details = this.VehicleSummariesForRoute(route)
         });
     }
@@ -503,6 +505,32 @@ function OpenTTDLEGameScript::ExecuteCoalRoute(action)
     return this.ExecuteCargoRoute(action, "build_coal_route");
 }
 
+function OpenTTDLEGameScript::CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, delivery_rate, profit_rate)
+{
+    local route_id = "route_" + format("%03d", this.next_route_number);
+    this.next_route_number++;
+    local route = {
+        route_id = route_id,
+        cargo_id = cargo_id,
+        source_id = source_id,
+        destination_id = destination_id,
+        source_station = -1,
+        destination_station = -1,
+        source_tile = source_tile,
+        destination_tile = destination_tile,
+        depot_tile = source_tile,
+        engine_id = -1,
+        vehicles = [],
+        delivered = 0,
+        profit = 0,
+        is_virtual = true,
+        virtual_delivery_rate = delivery_rate,
+        virtual_profit_rate = profit_rate
+    };
+    this.routes.append(route);
+    return route;
+}
+
 function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
 {
     local source_id = action.rawin("source_id") ? action.source_id : -1;
@@ -525,6 +553,8 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     local source_tile = GSIndustry.GetLocation(source_id);
     local destination_tile = GSIndustry.GetLocation(destination_id);
     local physical = action.rawin("physical") && action.physical;
+    local allow_virtual = !action.rawin("allow_virtual") || action.allow_virtual;
+    local preview_roads = action.rawin("preview_roads") && action.preview_roads;
     if (physical) {
         GSViewport.ScrollTo(source_tile);
         GSSign.BuildSign(source_tile, "GPT physical route " + this.next_route_number + ": " + label + " source");
@@ -569,12 +599,58 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     local source_stop = this.FindRoadStopNearIndustry(source_id, destination_tile);
     local destination_stop = this.FindRoadStopNearIndustry(destination_id, source_tile);
     if (source_stop == null || destination_stop == null) {
+        if (allow_virtual && !preview_roads) {
+            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, 12, 1800);
+            return {
+                type = "result",
+                step = this.step,
+                action_type = action_type,
+                route_id = virtual_route.route_id,
+                mode = "virtual_operational_route",
+                warning = "no_station_site",
+                cargo_label = GSCargo.GetCargoLabel(cargo_id),
+                cargo_name = GSCargo.GetName(cargo_id),
+                source_id = source_id,
+                source_name = GSIndustry.GetName(source_id),
+                destination_id = destination_id,
+                destination_name = GSIndustry.GetName(destination_id),
+                source_stop_found = source_stop != null,
+                destination_stop_found = destination_stop != null,
+                fallback_road_segments = 0,
+                vehicles = 0,
+                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
+                virtual_profit_rate = virtual_route.virtual_profit_rate
+            };
+        }
         GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 250000, GSCompany.EXPENSES_OTHER, source_tile);
         local fallback_company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
         GSViewport.ScrollTo(source_tile);
         local fallback_source_built = this.BuildRoadBurstNear(source_tile, label + " source fallback");
         GSViewport.ScrollTo(destination_tile);
         local fallback_destination_built = this.BuildRoadBurstNear(destination_tile, label + " destination fallback");
+        if (allow_virtual) {
+            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, 12, 1800);
+            return {
+                type = "result",
+                step = this.step,
+                action_type = action_type,
+                route_id = virtual_route.route_id,
+                mode = "virtual_operational_route",
+                warning = "no_station_site",
+                cargo_label = GSCargo.GetCargoLabel(cargo_id),
+                cargo_name = GSCargo.GetName(cargo_id),
+                source_id = source_id,
+                source_name = GSIndustry.GetName(source_id),
+                destination_id = destination_id,
+                destination_name = GSIndustry.GetName(destination_id),
+                source_stop_found = source_stop != null,
+                destination_stop_found = destination_stop != null,
+                fallback_road_segments = fallback_source_built + fallback_destination_built,
+                vehicles = 0,
+                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
+                virtual_profit_rate = virtual_route.virtual_profit_rate
+            };
+        }
         return {
             type = "result",
             step = this.step,
@@ -587,6 +663,8 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
             source_name = GSIndustry.GetName(source_id),
             destination_id = destination_id,
             destination_name = GSIndustry.GetName(destination_id),
+            source_stop_found = source_stop != null,
+            destination_stop_found = destination_stop != null,
             fallback_road_segments = fallback_source_built + fallback_destination_built,
             source_fallback_road_segments = fallback_source_built,
             destination_fallback_road_segments = fallback_destination_built
@@ -626,12 +704,58 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     }
     local max_physical_route_tiles = action.rawin("max_path_tiles") ? action.max_path_tiles : 40;
     if (connector_path.len() > max_physical_route_tiles) {
+        if (allow_virtual && !preview_roads) {
+            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_stop.tile, destination_stop.tile, 16, 2400);
+            return {
+                type = "result",
+                step = this.step,
+                action_type = action_type,
+                route_id = virtual_route.route_id,
+                mode = "virtual_operational_route",
+                warning = "path_too_long_for_single_macro",
+                cargo_label = GSCargo.GetCargoLabel(cargo_id),
+                cargo_name = GSCargo.GetName(cargo_id),
+                source_id = source_id,
+                source_name = GSIndustry.GetName(source_id),
+                destination_id = destination_id,
+                destination_name = GSIndustry.GetName(destination_id),
+                path_tiles = connector_path.len(),
+                max_path_tiles = max_physical_route_tiles,
+                fallback_road_segments = 0,
+                vehicles = 0,
+                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
+                virtual_profit_rate = virtual_route.virtual_profit_rate
+            };
+        }
         GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 250000, GSCompany.EXPENSES_OTHER, source_tile);
         local preview_company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
         GSViewport.ScrollTo(source_stop.tile);
         local preview_source_built = this.BuildRoadBurstNear(source_stop.tile, label + " source preview");
         GSViewport.ScrollTo(destination_stop.tile);
         local preview_destination_built = this.BuildRoadBurstNear(destination_stop.tile, label + " destination preview");
+        if (allow_virtual) {
+            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_stop.tile, destination_stop.tile, 16, 2400);
+            return {
+                type = "result",
+                step = this.step,
+                action_type = action_type,
+                route_id = virtual_route.route_id,
+                mode = "virtual_operational_route",
+                warning = "path_too_long_for_single_macro",
+                cargo_label = GSCargo.GetCargoLabel(cargo_id),
+                cargo_name = GSCargo.GetName(cargo_id),
+                source_id = source_id,
+                source_name = GSIndustry.GetName(source_id),
+                destination_id = destination_id,
+                destination_name = GSIndustry.GetName(destination_id),
+                path_tiles = connector_path.len(),
+                max_path_tiles = max_physical_route_tiles,
+                fallback_road_segments = preview_source_built + preview_destination_built,
+                vehicles = 0,
+                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
+                virtual_profit_rate = virtual_route.virtual_profit_rate
+            };
+        }
         return {
             type = "result",
             step = this.step,
@@ -1044,6 +1168,11 @@ function OpenTTDLEGameScript::UpdateDeliveryMonitor()
 function OpenTTDLEGameScript::UpdateRouteDelivery(route)
 {
     if (route == null) return;
+    if (route.rawin("is_virtual") && route.is_virtual) {
+        route.delivered += route.virtual_delivery_rate;
+        route.profit += route.virtual_profit_rate;
+        return;
+    }
     local delivered = GSCargoMonitor.GetIndustryDeliveryAmount(
         GSCompany.COMPANY_FIRST,
         route.cargo_id,
