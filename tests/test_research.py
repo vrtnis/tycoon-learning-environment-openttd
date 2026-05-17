@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from openttd_le.research.api import Prototype, get_cargo_chains
+from openttd_le.research.api import Prototype, get_cargo_chains, get_routes
 from openttd_le.research.benchmarks import aggregate_runs, load_benchmark_tasks, select_task
 from openttd_le.research.scoring import delivered_cargo_value, score_snapshot
 
@@ -43,6 +43,33 @@ class ResearchApiTests(unittest.TestCase):
         self.assertGreater(score, 20)
         snapshot = score_snapshot({"routes": [{"cargo_label": "STEL", "delivered": 2, "profit": 1000}]})
         self.assertGreater(snapshot["network_value"], snapshot["cargo_score"])
+
+    def test_route_objects_allow_dict_style_get_for_repl_agents(self) -> None:
+        route = get_routes(
+            {
+                "routes": [
+                    {
+                        "route_id": "route_1",
+                        "source_id": 29,
+                        "source_name": "Fort Coal Mine",
+                        "destination_id": 12,
+                        "destination_name": "Steel Mill",
+                        "cargo_id": 2,
+                        "cargo_label": "COAL",
+                        "vehicles": 5,
+                        "delivered": 20,
+                        "profit": 529,
+                        "source_waiting": 164,
+                        "destination_waiting": 0,
+                    }
+                ]
+            }
+        )[0]
+
+        self.assertEqual(route.get("route_id"), "route_1")
+        self.assertEqual(route.get("cargo_label"), Prototype.Cargo.Coal)
+        self.assertEqual(route["source_id"], 29)
+        self.assertEqual(route.get("destination_waiting"), 0)
 
 
 class BenchmarkTests(unittest.TestCase):

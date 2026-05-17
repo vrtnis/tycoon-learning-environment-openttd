@@ -82,7 +82,49 @@ class Route:
     delivered: int
     profit: float
     source_waiting: int = 0
+    destination_waiting: int = 0
     source_rating: int | None = None
+
+    @property
+    def route_id(self) -> str:
+        return self.id
+
+    @property
+    def cargo_id(self) -> int:
+        return self.cargo.id
+
+    @property
+    def cargo_label(self) -> str:
+        return self.cargo.label
+
+    @property
+    def cargo_name(self) -> str:
+        return self.cargo.name
+
+    @property
+    def source_id(self) -> int:
+        return self.source.id
+
+    @property
+    def source_name(self) -> str:
+        return self.source.name
+
+    @property
+    def destination_id(self) -> int:
+        return self.destination.id
+
+    @property
+    def destination_name(self) -> str:
+        return self.destination.name
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        value = self.get(key, None)
+        if value is None and not hasattr(self, key):
+            raise KeyError(key)
+        return value
 
 
 @dataclass(frozen=True)
@@ -165,6 +207,7 @@ def get_routes(observation: dict[str, Any], cargo_values: dict[str, float] | Non
                 delivered=_maybe_int(item.get("delivered")) or 0,
                 profit=float(item.get("profit", item.get("vehicle_profit", 0)) or 0),
                 source_waiting=_maybe_int(item.get("source_waiting", item.get("waiting_source", 0))) or 0,
+                destination_waiting=_maybe_int(item.get("destination_waiting", 0)) or 0,
                 source_rating=_maybe_int(item.get("source_rating")),
             )
         )
