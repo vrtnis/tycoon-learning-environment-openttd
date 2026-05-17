@@ -507,7 +507,7 @@ def launch_gpt_live(
         "-x",
         "-X",
         "-n",
-        f"127.0.0.1:{game_port}#255",
+        f"127.0.0.1:{game_port}#0",
         "-I",
         "OpenGFX",
         "-S",
@@ -633,7 +633,7 @@ def launch_coal_objective(
         "-x",
         "-X",
         "-n",
-        f"127.0.0.1:{game_port}#255",
+        f"127.0.0.1:{game_port}#0",
         "-I",
         "OpenGFX",
         "-S",
@@ -801,7 +801,7 @@ def launch_firs_live(
         "-x",
         "-X",
         "-n",
-        f"127.0.0.1:{game_port}#255",
+        f"127.0.0.1:{game_port}#0",
         "-I",
         "OpenGFX",
         "-S",
@@ -948,7 +948,7 @@ def launch_firs_live(
         "report": str(report_path),
         "recording": str(gameplay_path) if gameplay_path.exists() else None,
         "timelapse": str(timelapse_path) if timelapse_path.exists() else None,
-        "record_source": record_source or os.environ.get("OPENTTD_RECORD_SOURCE") or ("title=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")),
+        "record_source": record_source or os.environ.get("OPENTTD_RECORD_SOURCE") or ("window-region=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")),
         "repl": repl,
         "installed": installed,
         "firs_newgrf": str(install.newgrf_path),
@@ -1997,9 +1997,29 @@ def _start_recording(path: Path, *, source: str | None = None) -> subprocess.Pop
     capture_format = "gdigrab" if os.name == "nt" else "x11grab"
     capture_source = source or os.environ.get("OPENTTD_RECORD_SOURCE")
     if capture_source is None:
-        capture_source = "title=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")
+        capture_source = "window-region=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")
     input_args: list[str]
-    if os.name == "nt" and capture_source.startswith("title="):
+    if os.name == "nt" and capture_source.startswith("window-region="):
+        title = capture_source.removeprefix("window-region=")
+        rect = _wait_for_window_client_rect(title)
+        if rect is None:
+            return None
+        left, top, width, height = rect
+        input_args = [
+            "-f",
+            capture_format,
+            "-framerate",
+            "15",
+            "-offset_x",
+            str(left),
+            "-offset_y",
+            str(top),
+            "-video_size",
+            f"{width}x{height}",
+            "-i",
+            "desktop",
+        ]
+    elif os.name == "nt" and capture_source.startswith("title="):
         title = capture_source.removeprefix("title=")
         if _wait_for_window_title(title) is None:
             return None
@@ -2026,6 +2046,60 @@ def _start_recording(path: Path, *, source: str | None = None) -> subprocess.Pop
         str(path),
     ]
     return _popen_hidden(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE)
+
+
+def _wait_for_window_client_rect(title: str, timeout: float = 15.0) -> tuple[int, int, int, int] | None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rect = _find_window_client_rect(title)
+        if rect is not None:
+            return rect
+        time.sleep(0.25)
+    return None
+
+
+def _find_window_client_rect(title: str) -> tuple[int, int, int, int] | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    try:
+        user32.SetProcessDPIAware()
+    except OSError:
+        pass
+    matches: list[tuple[int, int, int, int]] = []
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    def enum_callback(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if title not in buffer.value:
+            return True
+        client_rect = wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+            return True
+        width = int(client_rect.right - client_rect.left)
+        height = int(client_rect.bottom - client_rect.top)
+        if width <= 0 or height <= 0:
+            return True
+        origin = POINT(0, 0)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+            return True
+        matches.append((int(origin.x), int(origin.y), width, height))
+        return False
+
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_callback)
+    user32.EnumWindows(callback, 0)
+    return matches[0] if matches else None
 
 
 def _wait_for_window_title(title: str, timeout: float = 15.0) -> str | None:

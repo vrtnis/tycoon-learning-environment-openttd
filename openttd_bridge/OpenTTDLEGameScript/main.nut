@@ -3,6 +3,7 @@ class OpenTTDLEGameScript extends GSController {
     coal_goal = null;
     routes = null;
     next_route_number = 1;
+    last_scroll = null;
 
     function Start();
     function SendObservation(reason);
@@ -10,6 +11,7 @@ class OpenTTDLEGameScript extends GSController {
     function ExecuteAction(message);
     function ChooseTownPair();
     function FindBuildableTileNear(center_tile);
+    function ScrollVisible(tile);
     function BuildRoadBurstNear(center_tile, label);
     function BuildRoadBurst(start_tile, label);
     function TryRoad(tile_a, tile_b);
@@ -104,6 +106,7 @@ function OpenTTDLEGameScript::SendObservation(reason)
         company_finances = {
             bank_balance = GSCompany.GetBankBalance(GSCompany.COMPANY_FIRST)
         },
+        last_scroll = this.last_scroll,
         active_objective = this.GoalSummary(),
         bank_balance = GSCompany.GetBankBalance(GSCompany.COMPANY_FIRST)
     });
@@ -252,6 +255,48 @@ function OpenTTDLEGameScript::FindBuildableTileNear(center_tile)
     return null;
 }
 
+function OpenTTDLEGameScript::ScrollVisible(tile)
+{
+    if (!GSMap.IsValidTile(tile)) return false;
+    local x = GSMap.GetTileX(tile);
+    local y = GSMap.GetTileY(tile);
+    if (GSGame.IsMultiplayer()) {
+        local scrolled = false;
+        local client_count = 0;
+        local success_count = 0;
+        local client_scrolls = [];
+        local clients = GSClientList();
+        foreach (client_id, _ in clients) {
+            client_count++;
+            if (client_id == GSClient.CLIENT_SERVER) continue;
+            local client_name = GSClient.GetName(client_id);
+            local client_scrolled = GSViewport.ScrollClientTo(client_id, tile);
+            client_scrolls.append({ id = client_id, name = client_name, scrolled = client_scrolled });
+            if (client_scrolled) {
+                scrolled = true;
+                success_count++;
+            }
+        }
+        local everyone_scrolled = false;
+        everyone_scrolled = GSViewport.ScrollEveryoneTo(tile);
+        if (everyone_scrolled) scrolled = true;
+        this.last_scroll = {
+            x = x,
+            y = y,
+            multiplayer = true,
+            client_count = client_count,
+            success_count = success_count,
+            clients = client_scrolls,
+            everyone_scrolled = everyone_scrolled,
+            scrolled = scrolled
+        };
+        return scrolled;
+    }
+    GSViewport.ScrollTo(tile);
+    this.last_scroll = { x = x, y = y, multiplayer = false, client_count = 0, success_count = 0, everyone_scrolled = false, scrolled = true };
+    return true;
+}
+
 function OpenTTDLEGameScript::BuildRoadBurstNear(center_tile, label)
 {
     local base_x = GSMap.GetTileX(center_tile);
@@ -314,7 +359,13 @@ function OpenTTDLEGameScript::TryRoad(tile_a, tile_b)
     if (!this.PathTileUsable(tile_a, tile_a, tile_b)) return false;
     if (!this.PathTileUsable(tile_b, tile_a, tile_b)) return false;
     if (GSRoad.AreRoadTilesConnected(tile_a, tile_b)) return false;
-    return GSRoad.BuildRoad(tile_a, tile_b);
+    local built = false;
+    {
+        local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
+        GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
+        built = GSRoad.BuildRoad(tile_a, tile_b);
+    }
+    return built;
 }
 
 function OpenTTDLEGameScript::CollectCargoPairs(label, limit)
@@ -560,7 +611,7 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     local allow_virtual = !action.rawin("allow_virtual") || action.allow_virtual;
     local preview_roads = action.rawin("preview_roads") && action.preview_roads;
     if (physical) {
-        GSViewport.ScrollTo(source_tile);
+        this.ScrollVisible(source_tile);
         GSSign.BuildSign(source_tile, "GPT physical route " + this.next_route_number + ": " + label + " source");
         GSSign.BuildSign(destination_tile, "GPT physical route " + this.next_route_number + ": destination");
     }
@@ -629,10 +680,9 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
             };
         }
         GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 250000, GSCompany.EXPENSES_OTHER, source_tile);
-        local fallback_company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
-        GSViewport.ScrollTo(source_tile);
+        this.ScrollVisible(source_tile);
         local fallback_source_built = this.BuildRoadBurstNear(source_tile, label + " source fallback");
-        GSViewport.ScrollTo(destination_tile);
+        this.ScrollVisible(destination_tile);
         local fallback_destination_built = this.BuildRoadBurstNear(destination_tile, label + " destination fallback");
         if (allow_virtual) {
             local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, 12, 1800);
@@ -678,13 +728,17 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     }
 
     GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 1000000, GSCompany.EXPENSES_OTHER, source_tile);
-    local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
     GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "company_mode_started" });
 
     local road_vehicle_type = GSRoad.GetRoadVehicleTypeForCargo(cargo_id);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "road_vehicle_type", road_vehicle_type = road_vehicle_type });
-    if (!GSRoad.BuildDriveThroughRoadStation(source_stop.tile, source_stop.front, road_vehicle_type, GSStation.STATION_NEW)) {
+    local source_station_built = false;
+    {
+        local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
+        source_station_built = GSRoad.BuildDriveThroughRoadStation(source_stop.tile, source_stop.front, road_vehicle_type, GSStation.STATION_NEW);
+    }
+    if (!source_station_built) {
         return {
             type = "result",
             step = this.step,
@@ -696,7 +750,12 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     local source_station = GSStation.GetStationID(source_stop.tile);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "source_station_built", station = source_station });
 
-    if (!GSRoad.BuildDriveThroughRoadStation(destination_stop.tile, destination_stop.front, road_vehicle_type, GSStation.STATION_NEW)) {
+    local destination_station_built = false;
+    {
+        local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
+        destination_station_built = GSRoad.BuildDriveThroughRoadStation(destination_stop.tile, destination_stop.front, road_vehicle_type, GSStation.STATION_NEW);
+    }
+    if (!destination_station_built) {
         return {
             type = "result",
             step = this.step,
@@ -739,10 +798,9 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
             };
         }
         GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 250000, GSCompany.EXPENSES_OTHER, source_tile);
-        local preview_company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
-        GSViewport.ScrollTo(source_stop.tile);
+        this.ScrollVisible(source_stop.tile);
         local preview_source_built = this.BuildRoadBurstNear(source_stop.tile, label + " source preview");
-        GSViewport.ScrollTo(destination_stop.tile);
+        this.ScrollVisible(destination_stop.tile);
         local preview_destination_built = this.BuildRoadBurstNear(destination_stop.tile, label + " destination preview");
         if (allow_virtual) {
             local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_stop.tile, destination_stop.tile, 16, 2400);
@@ -790,7 +848,7 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     foreach (tile in connector_path) path.append(tile);
     path.append(destination_stop.tile);
 
-    GSViewport.ScrollTo(source_stop.tile);
+    this.ScrollVisible(source_stop.tile);
     GSSign.BuildSign(source_stop.tile, "GPT route " + this.next_route_number + ": " + label + " load " + GSCargo.GetName(cargo_id));
     GSSign.BuildSign(destination_stop.tile, "GPT route " + this.next_route_number + ": unload at " + GSIndustry.GetName(destination_id));
     GSSign.BuildSign(this.MidpointTile(source_stop.tile, destination_stop.tile), "GPT route " + this.next_route_number + " midpoint");
@@ -810,7 +868,7 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
             path_tiles = path.len()
         };
     }
-    GSViewport.ScrollTo(destination_stop.tile);
+    this.ScrollVisible(destination_stop.tile);
     local depot_tile = this.FindAndBuildDepot(path);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "depot_checked", depot_tile = depot_tile });
     if (depot_tile == null) {
@@ -943,7 +1001,7 @@ function OpenTTDLEGameScript::ExecuteWait(action)
                     break;
                 }
             }
-            GSViewport.ScrollTo(target_tile);
+            this.ScrollVisible(target_tile);
             next_scroll = GSController.GetTick() + 600;
         }
         this.ReadAdminEvents();
@@ -1116,7 +1174,7 @@ function OpenTTDLEGameScript::BuildRoadPath(path)
             built++;
             if (built == 1 || built == 12 || built == 36) {
                 GSSign.BuildSign(path[i], "GPT cargo route road " + built);
-                GSViewport.ScrollTo(path[i]);
+                this.ScrollVisible(path[i]);
             }
             GSController.Sleep(4);
         }
@@ -1145,7 +1203,13 @@ function OpenTTDLEGameScript::FindAndBuildDepot(path)
             local depot = GSMap.GetTileIndex(x + dir[0], y + dir[1]);
             if (!GSMap.IsValidTile(depot)) continue;
             if (!GSTile.IsBuildable(depot)) continue;
-            if (GSRoad.BuildRoadDepot(depot, front)) {
+            local built = false;
+            {
+                local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
+                GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
+                built = GSRoad.BuildRoadDepot(depot, front);
+            }
+            if (built) {
                 GSSign.BuildSign(depot, "GPT cargo route depot");
                 return depot;
             }
@@ -1176,6 +1240,7 @@ function OpenTTDLEGameScript::FindRoadEngine(cargo_id)
 function OpenTTDLEGameScript::BuildRouteVehicles(depot_tile, engine_id, cargo_id, source_tile, destination_tile, count)
 {
     local vehicles = [];
+    local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
     for (local i = 0; i < count; i++) {
         local vehicle = GSVehicle.BuildVehicleWithRefit(depot_tile, engine_id, cargo_id);
         if (!GSVehicle.IsValidVehicle(vehicle)) {
