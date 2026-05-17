@@ -14,6 +14,7 @@ from openttd_le.backends.live import (
     launch_firs_live,
     launch_firs_research,
     launch_gpt_live,
+    launch_route_builder_benchmark,
 )
 from openttd_le.backends.openttd import OpenTTDBackend
 from openttd_le.backends.visual import install_bridge, launch_watch_game
@@ -171,6 +172,22 @@ def main(argv: list[str] | None = None) -> int:
     firs_benchmark_parser.add_argument("--benchmark-file", default=None)
     firs_benchmark_parser.add_argument("--allow-heuristic", action="store_true")
 
+    route_builder_parser = subparsers.add_parser(
+        "benchmark-route-builder",
+        help="Measure physical FIRS route-construction reliability without GPT planning.",
+    )
+    route_builder_parser.add_argument("--workbook", default="templates/firs_ops_plan.xlsx")
+    route_builder_parser.add_argument("--executable", default=None)
+    route_builder_parser.add_argument("--openttd-user-dir", default=None)
+    route_builder_parser.add_argument("--out", default="runs_route_builder")
+    route_builder_parser.add_argument("--seed", type=int, default=None)
+    route_builder_parser.add_argument("--economy", default=None)
+    route_builder_parser.add_argument("--attempts", type=int, default=20)
+    route_builder_parser.add_argument("--vehicles", type=int, default=None)
+    route_builder_parser.add_argument("--wait-months", type=int, default=6)
+    route_builder_parser.add_argument("--max-path-tiles", type=int, default=256)
+    route_builder_parser.add_argument("--target-success-rate", type=float, default=0.9)
+
     export_parser = subparsers.add_parser("export-xlsx", help="Export a run directory to a FIRS Excel report.")
     export_parser.add_argument("--run", required=True)
     export_parser.add_argument("--out", required=True)
@@ -286,6 +303,22 @@ def main(argv: list[str] | None = None) -> int:
             repeats=args.repeats,
             benchmark_file=Path(args.benchmark_file) if args.benchmark_file else None,
             allow_heuristic=args.allow_heuristic,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0
+    if args.command == "benchmark-route-builder":
+        payload = launch_route_builder_benchmark(
+            workbook=Path(args.workbook),
+            executable=args.executable,
+            openttd_user_dir=Path(args.openttd_user_dir) if args.openttd_user_dir else None,
+            output_root=Path(args.out),
+            seed=args.seed,
+            economy=args.economy,
+            attempts=args.attempts,
+            vehicles=args.vehicles,
+            wait_months=args.wait_months,
+            max_path_tiles=args.max_path_tiles,
+            target_success_rate=args.target_success_rate,
         )
         print(json.dumps(payload, indent=2))
         return 0

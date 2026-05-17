@@ -23,7 +23,12 @@ from openttd_le.backends.openttd import _find_openttd
 from openttd_le.backends.visual import ensure_opengfx, install_live_bridge
 from openttd_le.core.types import EnvError
 from openttd_le.research.api import Prototype, api_from_observation, get_cargo_chains, get_finance, get_industries, get_routes
-from openttd_le.research.benchmarks import aggregate_runs, select_task, task_to_workbook_meta
+from openttd_le.research.benchmarks import (
+    aggregate_route_builder_attempts,
+    aggregate_runs,
+    select_task,
+    task_to_workbook_meta,
+)
 from openttd_le.research.scoring import CARGO_VALUE, score_snapshot
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import read_firs_ops_workbook
@@ -1238,6 +1243,201 @@ def launch_firs_benchmark(
     return payload
 
 
+def launch_route_builder_benchmark(
+    *,
+    workbook: Path | str,
+    executable: str | None = None,
+    openttd_user_dir: Path | str | None = None,
+    output_root: Path | str = "runs_route_builder",
+    seed: int | None = None,
+    economy: str | None = None,
+    attempts: int = 20,
+    vehicles: int | None = None,
+    wait_months: int = 6,
+    max_path_tiles: int = 256,
+    target_success_rate: float = 0.9,
+) -> dict[str, Any]:
+    local_user_dir = _set_openttd_user_dir(openttd_user_dir)
+    workbook_path = Path(workbook)
+    run_config, workbook_meta = read_firs_ops_workbook(workbook_path)
+    if seed is not None:
+        run_config = replace(run_config, seed=int(seed))
+    if economy is not None:
+        run_config = replace(run_config, economy=str(economy))
+    route_vehicles = int(vehicles if vehicles is not None else run_config.vehicles_per_route)
+    exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
+    if not exe or not Path(exe).exists():
+        raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
+
+    install = verify_firs_installed(local_user_dir)
+    run_dir = _new_run_dir(Path(output_root), suffix="route_builder")
+    ensure_opengfx()
+    installed = install_live_bridge()
+    game_port = _find_free_port(3979)
+    admin_port = _find_free_port(3977)
+    cfg_text = render_firs_live_config(
+        run_config=run_config,
+        install=install,
+        game_port=game_port,
+        admin_port=admin_port,
+        admin_password=ADMIN_PASSWORD,
+    )
+    artifact_cfg_path = run_dir / "openttd.cfg"
+    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    cfg_path.write_text(cfg_text, encoding="ascii")
+    if cfg_path != artifact_cfg_path:
+        artifact_cfg_path.write_text(cfg_text, encoding="ascii")
+
+    server_cmd = [
+        str(exe),
+        "-D",
+        f"0.0.0.0:{game_port}",
+        "-g",
+        "-G",
+        str(run_config.seed),
+        "-c",
+        str(cfg_path),
+        "-x",
+        "-X",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+    ]
+    process_cwd = str(local_user_dir or Path(exe).parent)
+    server = _popen_hidden(
+        server_cmd,
+        cwd=process_cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+    attempts_path = run_dir / "route_builder_attempts.jsonl"
+    observations_path = run_dir / "observations.jsonl"
+    summary_path = run_dir / "summary.json"
+    admin = AdminClient("127.0.0.1", admin_port)
+    attempt_rows: list[dict[str, Any]] = []
+    final_observation: dict[str, Any] | None = None
+    failed = True
+    try:
+        admin.connect()
+        admin.send_gamescript({"type": "observe"})
+        observation = _next_observation(admin, timeout=90.0)
+        final_observation = observation
+        pairs = _route_builder_candidate_pairs(observation, workbook_meta, limit=max(1, attempts))
+        with (
+            attempts_path.open("a", encoding="utf-8") as attempts_file,
+            observations_path.open("a", encoding="utf-8") as observations_file,
+        ):
+            _write_jsonl(observations_file, {"attempt": 0, "observation": observation})
+            for index, pair in enumerate(pairs[:attempts], start=1):
+                action = _build_action_from_pair(pair, route_vehicles, f"route builder benchmark {index}")
+                action["max_path_tiles"] = int(max_path_tiles)
+                before_count = len(observation.get("routes", []) or [])
+                result: dict[str, Any]
+                try:
+                    admin.send_gamescript({"type": "action", "action": action})
+                    result = _next_result(admin, timeout=180.0)
+                    observation = _next_observation(admin, timeout=90.0)
+                except Exception as exc:
+                    result = {
+                        "type": "result",
+                        "action_type": "build_cargo_route",
+                        "error": "action_timeout_or_error",
+                        "detail": str(exc),
+                    }
+                    admin.send_gamescript({"type": "observe"})
+                    observation = _next_observation(admin, timeout=90.0)
+                route = _matching_route(observation, pair)
+                build_success = not result.get("error") and route is not None and not bool(route.get("is_virtual"))
+                wait_result: dict[str, Any] | None = None
+                if build_success and wait_months > 0:
+                    wait_action = {
+                        "type": "wait_months",
+                        "months": int(wait_months),
+                        "label": f"route builder delivery validation {index}",
+                    }
+                    try:
+                        admin.send_gamescript({"type": "action", "action": wait_action})
+                        wait_result = _next_result(admin, timeout=max(120.0, wait_months * 90.0))
+                        observation = _next_observation(admin, timeout=90.0)
+                    except Exception as exc:
+                        wait_result = {
+                            "type": "result",
+                            "action_type": "wait_months",
+                            "error": "action_timeout_or_error",
+                            "detail": str(exc),
+                        }
+                        admin.send_gamescript({"type": "observe"})
+                        observation = _next_observation(admin, timeout=120.0)
+                    route = _matching_route(observation, pair)
+                final_observation = observation
+                delivered = int((route or {}).get("delivered", 0) or 0)
+                profit = float((route or {}).get("profit", (route or {}).get("vehicle_profit", 0)) or 0)
+                active_success = build_success and _route_active(route)
+                operational_success = build_success and (delivered > 0 or profit > 0)
+                failure_reason = _route_builder_failure_reason(result, wait_result, route, build_success, operational_success)
+                row = {
+                    "attempt": index,
+                    "source_id": pair.get("source_id"),
+                    "source_name": pair.get("source_name"),
+                    "destination_id": pair.get("destination_id"),
+                    "destination_name": pair.get("destination_name"),
+                    "cargo_id": pair.get("cargo_id"),
+                    "cargo_label": pair.get("cargo_label"),
+                    "distance": pair.get("distance"),
+                    "production": pair.get("production"),
+                    "routes_before": before_count,
+                    "routes_after": len(observation.get("routes", []) or []),
+                    "build_success": build_success,
+                    "active_success": active_success,
+                    "operational_success": operational_success,
+                    "delivered": delivered,
+                    "profit": round(profit, 3),
+                    "error": result.get("error"),
+                    "failure_reason": failure_reason,
+                    "result": result,
+                    "wait_result": wait_result,
+                }
+                attempt_rows.append(row)
+                _write_jsonl(attempts_file, row)
+                _write_jsonl(observations_file, {"attempt": index, "observation": observation})
+        failed = False
+    finally:
+        admin.close()
+        _terminate_process(server)
+
+    aggregate = aggregate_route_builder_attempts(attempt_rows, target_success_rate=target_success_rate)
+    payload = {
+        "objective": "route_builder_level1",
+        "failed": failed,
+        "seed": run_config.seed,
+        "economy": run_config.economy,
+        "attempts_requested": attempts,
+        "attempts_executed": len(attempt_rows),
+        "vehicles": route_vehicles,
+        "wait_months": wait_months,
+        "max_path_tiles": max_path_tiles,
+        "aggregate": aggregate,
+        "final_tick": final_observation.get("tick") if final_observation else None,
+        "final_routes": final_observation.get("routes", []) if final_observation else [],
+        "attempts": str(attempts_path),
+        "observations": str(observations_path),
+        "summary": str(summary_path),
+        "run_dir": str(run_dir),
+        "workbook": str(workbook_path),
+        "installed": installed,
+        "firs_newgrf": str(install.newgrf_path),
+        "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
+        "server_command": server_cmd,
+    }
+    summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
 def _load_task_list(benchmark_file: Path | str | None) -> list[Any]:
     from openttd_le.research.benchmarks import load_benchmark_tasks
 
@@ -1699,6 +1899,33 @@ def _candidate_open_play_pairs(observation: dict[str, Any], *, limit: int) -> li
     return graph[:limit]
 
 
+def _route_builder_candidate_pairs(
+    observation: dict[str, Any],
+    workbook_meta: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    sources = [
+        _candidate_firs_pairs(observation.get("industry_graph", []), workbook_meta.get("objectives", []), limit=limit),
+        _candidate_firs_pairs_from_io(observation, workbook_meta.get("objectives", []), limit=limit),
+        _candidate_open_play_pairs(observation, limit=limit * 2),
+    ]
+    for source in sources:
+        for pair in source:
+            key = _route_key(pair)
+            if key in seen:
+                continue
+            if not all(isinstance(pair.get(field), int) for field in ("source_id", "destination_id", "cargo_id")):
+                continue
+            seen.add(key)
+            candidates.append(pair)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
 def _route_already_registered(pair: dict[str, Any], routes: list[dict[str, Any]]) -> bool:
     for route in routes:
         if (
@@ -1708,6 +1935,57 @@ def _route_already_registered(pair: dict[str, Any], routes: list[dict[str, Any]]
         ):
             return True
     return False
+
+
+def _matching_route(observation: dict[str, Any], pair: dict[str, Any]) -> dict[str, Any] | None:
+    for route in observation.get("routes", []) or []:
+        if (
+            route.get("source_id") == pair.get("source_id")
+            and route.get("destination_id") == pair.get("destination_id")
+            and route.get("cargo_id") == pair.get("cargo_id")
+        ):
+            return route
+    return None
+
+
+def _route_active(route: dict[str, Any] | None) -> bool:
+    if route is None:
+        return False
+    vehicles = route.get("vehicle_details", []) or []
+    if not vehicles:
+        return int(route.get("vehicles", 0) or 0) > 0
+    for vehicle in vehicles:
+        if not vehicle.get("valid", True):
+            continue
+        if int(vehicle.get("orders", 0) or 0) <= 0:
+            continue
+        if not bool(vehicle.get("in_depot", False)):
+            return True
+        if int(vehicle.get("load", 0) or 0) > 0:
+            return True
+    return False
+
+
+def _route_builder_failure_reason(
+    result: dict[str, Any],
+    wait_result: dict[str, Any] | None,
+    route: dict[str, Any] | None,
+    build_success: bool,
+    operational_success: bool,
+) -> str | None:
+    if operational_success:
+        return None
+    if result.get("error"):
+        return str(result["error"])
+    if not build_success:
+        return "route_not_registered"
+    if wait_result and wait_result.get("error"):
+        return str(wait_result["error"])
+    if route is None:
+        return "route_missing_after_wait"
+    if int(route.get("vehicles", 0) or 0) <= 0:
+        return "no_vehicles"
+    return "no_delivery_after_wait"
 
 
 def _route_key(pair: dict[str, Any]) -> tuple[Any, Any, Any]:

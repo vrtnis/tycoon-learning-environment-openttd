@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from openttd_le.research.api import Prototype, get_cargo_chains, get_routes
-from openttd_le.research.benchmarks import aggregate_runs, load_benchmark_tasks, select_task
+from openttd_le.research.benchmarks import aggregate_route_builder_attempts, aggregate_runs, load_benchmark_tasks, select_task
 from openttd_le.research.scoring import delivered_cargo_value, score_snapshot
 
 
@@ -90,6 +90,23 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(aggregate["runs"], 2)
         self.assertEqual(aggregate["success_rate"], 0.5)
         self.assertEqual(aggregate["median_network_value"], 10)
+
+    def test_aggregate_route_builder_attempts(self) -> None:
+        aggregate = aggregate_route_builder_attempts(
+            [
+                {"build_success": True, "active_success": True, "operational_success": True},
+                {"build_success": True, "active_success": True, "operational_success": False, "failure_reason": "no_delivery_after_wait"},
+                {"build_success": False, "active_success": False, "operational_success": False, "error": "road_connection_failed"},
+            ],
+            target_success_rate=0.9,
+        )
+
+        self.assertEqual(aggregate["attempts"], 3)
+        self.assertEqual(aggregate["build_success_rate"], 0.667)
+        self.assertEqual(aggregate["active_success_rate"], 0.667)
+        self.assertEqual(aggregate["operational_success_rate"], 0.333)
+        self.assertFalse(aggregate["level1_pass"])
+        self.assertEqual(aggregate["failure_counts"]["road_connection_failed"], 1)
 
 
 if __name__ == "__main__":
