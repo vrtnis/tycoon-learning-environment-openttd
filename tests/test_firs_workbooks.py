@@ -168,6 +168,8 @@ class FIRSActionTests(unittest.TestCase):
         self.assertEqual(action["source_id"], 11)
         self.assertEqual(action["vehicles"], 5)
         self.assertIs(action["physical"], True)
+        self.assertIs(action["allow_virtual"], False)
+        self.assertGreaterEqual(action["max_path_tiles"], 256)
 
     def test_io_candidate_fallback_matches_objective_chain(self) -> None:
         candidates = _candidate_firs_pairs_from_io(

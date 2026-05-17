@@ -172,10 +172,10 @@ namespace. The exposed API is deliberately high-level: `observe()`,
 `inspect_bottlenecks()`, `borrow_or_repay()`, typed `cargo_chains`,
 `industries`, `finance`, and a small `Prototype` namespace. The benchmark writes
 separate JSONL artifacts for programs, stdout/stderr, observations, actions, and
-rewards so model comparisons do not depend on video recording. Research mode can
-fall back to explicitly marked `python_virtual_operational_route` routes when
-OpenTTD cannot place physical stations; those routes make the REPL/reward loop
-stable while physical construction is improved separately.
+rewards so model comparisons do not depend on video recording. Research mode now
+defaults to physical construction: `build_cargo_route()` attempts real OpenTTD
+stations, roads, depots, and vehicles with `allow_virtual=False`, returning typed
+failures when the bridge cannot build a continuous route.
 
 Batch model/task comparisons use:
 

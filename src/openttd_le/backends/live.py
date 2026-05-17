@@ -285,8 +285,8 @@ class FIRSReplSession:
         cargo_id: int,
         vehicles: int | None = None,
         physical: bool = True,
-        max_path_tiles: int = 40,
-        allow_virtual: bool = True,
+        max_path_tiles: int = 256,
+        allow_virtual: bool = False,
         preview_roads: bool = False,
         label: str = "",
     ) -> dict[str, Any]:
@@ -1408,14 +1408,14 @@ def _choose_firs_repl_program(
                     "last_stdout, last_stderr. Available functions: get_industries(), get_cargo_chains(), "
                     "get_routes(), get_finance(), short_routes(max_distance=40,cargo=None), "
                     "observe(), build_cargo_route(source_id, destination_id, cargo_id, vehicles=5, "
-                    "physical=True, max_path_tiles=40, allow_virtual=True, preview_roads=False, label=''), "
+                    "physical=True, max_path_tiles=256, allow_virtual=False, preview_roads=False, label=''), "
                     "add_vehicles(route_id,count), wait_months(months,label=''), "
                     "inspect_bottlenecks(), borrow_or_repay(amount). Do not import modules. Do not read or "
                     "write files. Do not use network calls. Use at most one or two game-changing helper calls "
                     "per program. Print concise diagnostics. If routes is empty and candidate_routes exists, "
                     "build candidate_routes[0] with physical=True so visible stations, roads, depots, and "
-                    "vehicles are attempted. Keep max_path_tiles at 40 unless you are deliberately testing a "
-                    "short route; long paths return a bounded preview instead of blocking the episode."
+                    "vehicles are attempted. Keep allow_virtual=False for parity runs; long paths return a "
+                    "typed failure instead of silently creating virtual progress."
                 ),
             },
             {"role": "user", "content": json.dumps(model_observation, separators=(",", ":"))},
@@ -1452,7 +1452,7 @@ def _heuristic_firs_program(
             "route = candidate_routes[0]\n"
             "print('building physical route', route)\n"
             "build_cargo_route(route['source_id'], route['destination_id'], route['cargo_id'], "
-            f"vehicles={vehicles_per_route}, physical=True, max_path_tiles=40, allow_virtual=True, preview_roads=False, "
+            f"vehicles={vehicles_per_route}, physical=True, max_path_tiles=256, allow_virtual=False, preview_roads=False, "
             "label='repl first physical route')"
         )
     if routes:
@@ -1738,8 +1738,8 @@ def _build_action_from_pair(pair: dict[str, Any], vehicles: int, label: str) -> 
         "cargo_id": pair["cargo_id"],
         "vehicles": vehicles,
         "physical": True,
-        "max_path_tiles": 40,
-        "allow_virtual": True,
+        "max_path_tiles": 256,
+        "allow_virtual": False,
         "preview_roads": False,
         "label": label,
     }
