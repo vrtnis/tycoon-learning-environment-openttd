@@ -21,6 +21,7 @@ from openttd_le.backends.visual import install_bridge, launch_watch_game
 from openttd_le.core.artifacts import RunArtifacts
 from openttd_le.core.env import OpenTTDLEnv
 from openttd_le.core.scenarios import load_registry
+from openttd_le.replay import export_replay
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import create_firs_ops_workbook
 
@@ -193,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--out", required=True)
     export_parser.add_argument("--workbook", default=None)
 
+    replay_parser = subparsers.add_parser("export-replay", help="Export a run directory to a replay manifest JSON.")
+    replay_parser.add_argument("--run", required=True)
+    replay_parser.add_argument("--out", default=None)
+
     args = parser.parse_args(argv)
     if args.command == "list-scenarios":
         return _list_scenarios(args.scenario_file)
@@ -325,6 +330,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export-xlsx":
         path = export_run_to_xlsx(Path(args.run), Path(args.out), source_workbook=args.workbook)
         print(json.dumps({"report": str(path)}, indent=2))
+        return 0
+    if args.command == "export-replay":
+        path = export_replay(Path(args.run), Path(args.out) if args.out else None)
+        print(json.dumps({"replay": str(path)}, indent=2))
         return 0
     raise AssertionError(args.command)
 

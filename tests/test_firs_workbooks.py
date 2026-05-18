@@ -20,6 +20,7 @@ from openttd_le.backends.live import (
     _parse_json,
     _route_already_registered,
 )
+from openttd_le.replay import export_replay
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import create_firs_ops_workbook, read_firs_ops_workbook
 
@@ -91,6 +92,41 @@ class FIRSWorkbookTests(unittest.TestCase):
             self.assertTrue(report.exists())
             _, meta = read_firs_ops_workbook(workbook)
             self.assertEqual(meta["objectives"][0]["cargo"], "COAL")
+
+    def test_export_replay_writes_programs_actions_and_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "summary.json").write_text(
+                json.dumps({"objective": "firs_ops_chain", "model": "gpt-5.5", "seed": 1, "economy": "basic_temperate"}),
+                encoding="utf-8",
+            )
+            (run_dir / "launch.json").write_text(
+                json.dumps({"recording": str(run_dir / "gameplay.mp4"), "report": str(run_dir / "report.xlsx")}),
+                encoding="utf-8",
+            )
+            (run_dir / "firs_trace.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"event": "initial_observation", "data": {"tick": 0}}),
+                        json.dumps({"event": "repl_program", "step": 1, "data": {"code": "print('build')"}}),
+                        json.dumps({"event": "repl_feedback", "step": 1, "data": {"stdout": "build\n", "stderr": "", "actions": 1}}),
+                        json.dumps({"event": "action", "step": 1, "data": {"type": "build_cargo_route"}}),
+                        json.dumps({"event": "result", "step": 1, "data": {"type": "result", "route_id": "route_1"}}),
+                        json.dumps({"event": "observation", "step": 1, "data": {"routes": [{"route_id": "route_1"}]}}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            path = export_replay(run_dir)
+            replay = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(replay["schema"], "openttd-le-replay-v1")
+            self.assertEqual(replay["scenario"]["model"], "gpt-5.5")
+            self.assertEqual(replay["steps"][0]["program"], "print('build')")
+            self.assertEqual(replay["steps"][0]["actions"][0]["type"], "build_cargo_route")
+            self.assertEqual(replay["steps"][0]["results"][0]["route_id"], "route_1")
 
 
 class FIRSConfigTests(unittest.TestCase):
