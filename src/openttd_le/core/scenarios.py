@@ -24,6 +24,9 @@ class ScenarioRegistry:
     def list(self) -> list[Scenario]:
         return [self._scenarios[key] for key in sorted(self._scenarios)]
 
+    def extend(self, scenarios: Iterable[Scenario]) -> "ScenarioRegistry":
+        return ScenarioRegistry([*self.list(), *scenarios])
+
 
 def load_registry(path: str | Path | None = None) -> ScenarioRegistry:
     scenario_file = Path(path) if path else DEFAULT_SCENARIO_FILE

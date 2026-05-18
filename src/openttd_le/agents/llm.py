@@ -19,7 +19,7 @@ Allowed actions:
 {"type":"take_loan","amount":50000}
 {"type":"repay_loan","amount":50000}
 
-Prefer profitable cargo/passenger routes, keep debt controlled, add vehicles to routes before waiting, and submit only valid IDs from the observation."""
+Prefer actions from candidate_actions when present. Prefer profitable cargo/passenger routes, keep debt controlled, add vehicles to routes before waiting, and submit only valid IDs from the observation."""
 
 
 class OpenAIAgent(Agent):
@@ -95,6 +95,7 @@ def _compact_observation(observation: dict[str, Any]) -> dict[str, Any]:
         "company": observation["company"],
         "nodes": observation["nodes"],
         "routes": observation["routes"],
+        "candidate_actions": observation.get("candidate_actions", [])[:12],
         "metrics": observation["metrics"],
         "last_event": observation["last_event"],
     }

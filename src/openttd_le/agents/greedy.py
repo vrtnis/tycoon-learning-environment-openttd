@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from openttd_le.backends.toy import CARGO_REVENUE, MODE_CONFIG
+from openttd_le.core.logistics import CARGO_REVENUE, MODE_CONFIG
 
 from .base import Agent
 
@@ -11,6 +11,10 @@ class GreedyAgent(Agent):
     name = "greedy"
 
     def act(self, observation: dict[str, Any]) -> dict[str, Any]:
+        frontier_action = self._frontier_action(observation)
+        if frontier_action:
+            return frontier_action
+
         cash = observation["company"]["cash"]
         loan = observation["company"]["loan"]
         max_loan = observation["company"]["max_loan"]
@@ -41,7 +45,23 @@ class GreedyAgent(Agent):
 
         if cash > 80_000 and loan > 0:
             return {"type": "repay_loan", "amount": min(loan, cash - 50_000)}
-        return {"type": "wait", "months": 3}
+            return {"type": "wait", "months": 3}
+
+    def _frontier_action(self, observation: dict[str, Any]) -> dict[str, Any] | None:
+        candidates = observation.get("candidate_actions") or []
+        for kind in ("add_vehicle", "build_route", "take_loan", "repay_loan", "wait"):
+            for candidate in candidates:
+                if candidate.get("kind") != kind:
+                    continue
+                if not candidate.get("directly_executable"):
+                    continue
+                if kind == "build_route" and float(candidate.get("estimates", {}).get("monthly_profit", 0) or 0) <= 0:
+                    continue
+                if kind == "wait" and observation.get("routes"):
+                    return dict(candidate["action"])
+                if kind != "wait":
+                    return dict(candidate["action"])
+        return None
 
     def _route_needing_vehicle(self, observation: dict[str, Any]) -> dict[str, Any] | None:
         routes = sorted(observation["routes"], key=lambda route: route["vehicles"])

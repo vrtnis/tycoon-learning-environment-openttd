@@ -3,11 +3,15 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from .research import candidate_actions_from_observation
+from .schemas import OBSERVATION_SCHEMA, schema_manifest
 from .types import GameState, Scenario
 
 
 def build_observation(scenario: Scenario, state: GameState) -> dict[str, Any]:
-    return {
+    observation = {
+        "schema": OBSERVATION_SCHEMA,
+        "schemas": schema_manifest(),
         "scenario": {
             "id": scenario.id,
             "name": scenario.name,
@@ -78,3 +82,5 @@ def build_observation(scenario: Scenario, state: GameState) -> dict[str, Any]:
             "repay_loan",
         ],
     }
+    observation["candidate_actions"] = candidate_actions_from_observation(observation)
+    return observation

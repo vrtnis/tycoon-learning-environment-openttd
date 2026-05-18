@@ -5,6 +5,7 @@ from typing import Any
 from openttd_le.backends import Backend, make_backend
 from openttd_le.core.actions import normalize_action
 from openttd_le.core.observation import build_observation
+from openttd_le.core.research import candidate_actions_from_observation, decompose_step_reward, preview_action
 from openttd_le.core.scenarios import ScenarioRegistry, load_registry
 from openttd_le.core.types import EnvError, GameState, Scenario, StepResult
 
@@ -27,15 +28,24 @@ class OpenTTDLEnv:
 
     def step(self, action: dict[str, Any]) -> StepResult:
         self._require_reset()
+        previous_observation = self.observe()
         previous_score = self.state.metrics.score  # type: ignore[union-attr]
+        applied_action = action
         try:
             normalized = normalize_action(action)
+            applied_action = normalized
             self.state = self.backend.apply(normalized)
         except EnvError as exc:
             self.state.metrics.invalid_actions += 1  # type: ignore[union-attr]
             self.state.last_event = f"Invalid action: {exc}"  # type: ignore[union-attr]
         reward = self.state.metrics.score - previous_score  # type: ignore[union-attr]
         obs = self.observe()
+        reward_details = decompose_step_reward(
+            previous_observation,
+            obs,
+            action=applied_action,
+            score_delta=reward,
+        )
         return StepResult(
             observation=obs,
             reward=reward,
@@ -45,12 +55,19 @@ class OpenTTDLEnv:
                 "score": self.state.metrics.score,
                 "metrics": obs["metrics"],
                 "last_event": self.state.last_event,
+                "reward_details": reward_details,
             },
         )
 
     def observe(self) -> dict[str, Any]:
         scenario, state = self._require_reset()
         return build_observation(scenario, state)
+
+    def candidate_actions(self, limit: int = 24) -> list[dict[str, Any]]:
+        return candidate_actions_from_observation(self.observe(), limit=limit)
+
+    def preview(self, action: dict[str, Any]) -> dict[str, Any]:
+        return preview_action(self.observe(), action)
 
     def close(self) -> None:
         self.backend.close()

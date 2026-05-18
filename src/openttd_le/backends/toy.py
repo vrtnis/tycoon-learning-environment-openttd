@@ -5,38 +5,9 @@ from dataclasses import asdict
 from typing import Any
 
 from openttd_le.backends.base import Backend
+from openttd_le.core.logistics import CARGO_REVENUE, MODE_CONFIG
 from openttd_le.core.scoring import score_state
 from openttd_le.core.types import EnvError, GameState, Metrics, Node, Route, Scenario, distance
-
-
-MODE_CONFIG = {
-    "road": {
-        "track_cost": 900.0,
-        "station_cost": 9_000.0,
-        "vehicle_cost": 18_000.0,
-        "vehicle_capacity": 26.0,
-        "maintenance": 520.0,
-        "speed_factor": 0.72,
-    },
-    "rail": {
-        "track_cost": 2_150.0,
-        "station_cost": 24_000.0,
-        "vehicle_cost": 42_000.0,
-        "vehicle_capacity": 70.0,
-        "maintenance": 1_250.0,
-        "speed_factor": 1.12,
-    },
-}
-
-CARGO_REVENUE = {
-    "coal": 40.0,
-    "oil": 45.0,
-    "wood": 35.0,
-    "grain": 32.0,
-    "goods": 50.0,
-    "passengers": 28.0,
-    "mail": 50.0,
-}
 
 
 class ToyLogisticsBackend(Backend):

@@ -21,8 +21,12 @@ from openttd_le.backends.openttd import OpenTTDBackend
 from openttd_le.backends.visual import install_bridge, launch_watch_game
 from openttd_le.core.artifacts import RunArtifacts
 from openttd_le.core.env import OpenTTDLEnv
+from openttd_le.core.procedural import DEFAULT_PROCEDURAL_COUNT_PER_FAMILY, PROCEDURAL_FAMILIES, generate_procedural_scenarios
 from openttd_le.core.scenarios import load_registry
+from openttd_le.research.core_benchmark import CORE_SUITE_TASKS, CoreBenchmarkConfig, run_core_benchmark
+from openttd_le.research.dataset import export_core_dataset
 from openttd_le.replay import export_replay
+from openttd_le.replay_render import render_core_replay
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import create_firs_ops_workbook
 
@@ -35,9 +39,17 @@ def main(argv: list[str] | None = None) -> int:
     list_parser = subparsers.add_parser("list-scenarios", help="List bundled scenarios.")
     list_parser.add_argument("--scenario-file", default=None)
 
+    list_procedural_parser = subparsers.add_parser("list-procedural-scenarios", help="List generated procedural scenarios.")
+    list_procedural_parser.add_argument("--split", choices=["train", "dev", "test"], default="dev")
+    list_procedural_parser.add_argument("--count-per-family", type=int, default=DEFAULT_PROCEDURAL_COUNT_PER_FAMILY)
+
     eval_parser = subparsers.add_parser("eval", help="Run an agent on a scenario.")
     eval_parser.add_argument("--scenario", required=True)
-    eval_parser.add_argument("--agent", choices=["random", "greedy", "openai", "openrouter"], default="greedy")
+    eval_parser.add_argument(
+        "--agent",
+        choices=["random", "greedy", "candidate_rank", "preview_rerank", "openai", "openrouter"],
+        default="greedy",
+    )
     eval_parser.add_argument("--model", default=None)
     eval_parser.add_argument("--backend", choices=["toy", "openttd"], default="toy")
     eval_parser.add_argument("--scenario-file", default=None)
@@ -49,6 +61,28 @@ def main(argv: list[str] | None = None) -> int:
     summary_parser = subparsers.add_parser("summarize", help="Summarize run artifacts.")
     summary_parser.add_argument("runs_dir", nargs="?", default="runs")
     summary_parser.add_argument("--json", action="store_true", help="Emit JSON instead of a text table.")
+
+    benchmark_core_parser = subparsers.add_parser(
+        "benchmark-core",
+        help="Run the local researcher MVP benchmark suite across agents and seeds.",
+    )
+    benchmark_core_parser.add_argument("--suite", choices=["core", "procedural"], default="core")
+    benchmark_core_parser.add_argument("--split", choices=["train", "dev", "test"], default="dev")
+    benchmark_core_parser.add_argument(
+        "--agents",
+        default="random,greedy,candidate_rank,preview_rerank",
+        help="Comma-separated agent names.",
+    )
+    benchmark_core_parser.add_argument("--seeds", default="1,2,3", help="Comma-separated integer seeds.")
+    benchmark_core_parser.add_argument(
+        "--tasks",
+        default="",
+        help="Comma-separated scenario ids. Defaults to the selected suite.",
+    )
+    benchmark_core_parser.add_argument("--backend", choices=["toy"], default="toy")
+    benchmark_core_parser.add_argument("--out", default="runs_core")
+    benchmark_core_parser.add_argument("--max-steps", type=int, default=None)
+    benchmark_core_parser.add_argument("--procedural-count-per-family", type=int, default=DEFAULT_PROCEDURAL_COUNT_PER_FAMILY)
 
     smoke_parser = subparsers.add_parser("smoke-openttd", help="Check real OpenTTD executable integration.")
     smoke_parser.add_argument("--executable", default=None)
@@ -195,9 +229,21 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--out", required=True)
     export_parser.add_argument("--workbook", default=None)
 
+    dataset_parser = subparsers.add_parser("export-dataset", help="Export core research traces to JSONL or Parquet.")
+    dataset_parser.add_argument("--run", required=True, help="Run directory or parent directory containing runs.")
+    dataset_parser.add_argument("--out", required=True)
+    dataset_parser.add_argument("--format", choices=["jsonl", "parquet"], default=None)
+
     replay_parser = subparsers.add_parser("export-replay", help="Export a run directory to a replay manifest JSON.")
     replay_parser.add_argument("--run", required=True)
     replay_parser.add_argument("--out", default=None)
+
+    render_core_parser = subparsers.add_parser("render-core-replay", help="Render core/toy episode traces to SVG frames or MP4.")
+    render_core_source = render_core_parser.add_mutually_exclusive_group(required=True)
+    render_core_source.add_argument("--episode", default=None, help="Path to episode.jsonl.")
+    render_core_source.add_argument("--replay", default=None, help="Path to replay.json; sibling episode.jsonl will be used.")
+    render_core_parser.add_argument("--out", required=True, help="Output frame directory or .mp4 path.")
+    render_core_parser.add_argument("--fps", type=int, default=1)
 
     play_replay_parser = subparsers.add_parser("play-replay", help="Replay macro-actions from replay.json in OpenTTD/FIRS.")
     play_replay_parser.add_argument("--replay", required=True)
@@ -216,10 +262,28 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "list-scenarios":
         return _list_scenarios(args.scenario_file)
+    if args.command == "list-procedural-scenarios":
+        return _list_procedural_scenarios(args.split, args.count_per_family)
     if args.command == "eval":
         return _eval(args)
     if args.command == "summarize":
         return _summarize(args.runs_dir, as_json=args.json)
+    if args.command == "benchmark-core":
+        payload = run_core_benchmark(
+            CoreBenchmarkConfig(
+                suite=args.suite,
+                split=args.split,
+                agents=tuple(_split_csv(args.agents)),
+                seeds=tuple(int(item) for item in _split_csv(args.seeds)),
+                tasks=tuple(_split_csv(args.tasks)) if args.tasks else (),
+                procedural_count_per_family=args.procedural_count_per_family,
+                backend=args.backend,
+                output_root=Path(args.out),
+                max_steps=args.max_steps,
+            )
+        )
+        print(json.dumps({"summary": str(Path(args.out) / "benchmark_summary.json"), "aggregate": payload["aggregate"]}, indent=2))
+        return 0
     if args.command == "smoke-openttd":
         backend = OpenTTDBackend(executable=args.executable)
         if args.launch:
@@ -346,9 +410,22 @@ def main(argv: list[str] | None = None) -> int:
         path = export_run_to_xlsx(Path(args.run), Path(args.out), source_workbook=args.workbook)
         print(json.dumps({"report": str(path)}, indent=2))
         return 0
+    if args.command == "export-dataset":
+        path = export_core_dataset(Path(args.run), Path(args.out), output_format=args.format)
+        print(json.dumps({"dataset": str(path)}, indent=2))
+        return 0
     if args.command == "export-replay":
         path = export_replay(Path(args.run), Path(args.out) if args.out else None)
         print(json.dumps({"replay": str(path)}, indent=2))
+        return 0
+    if args.command == "render-core-replay":
+        payload = render_core_replay(
+            episode=Path(args.episode) if args.episode else None,
+            replay=Path(args.replay) if args.replay else None,
+            out=Path(args.out),
+            fps=args.fps,
+        )
+        print(json.dumps(payload, indent=2))
         return 0
     if args.command == "play-replay":
         payload = launch_firs_replay(
@@ -374,6 +451,17 @@ def _list_scenarios(scenario_file: str | None) -> int:
     for scenario in registry.list():
         print(f"{scenario.id}\t{scenario.name}\t{scenario.task}")
     return 0
+
+
+def _list_procedural_scenarios(split: str, count_per_family: int) -> int:
+    scenarios = generate_procedural_scenarios(split=split, families=PROCEDURAL_FAMILIES, count_per_family=count_per_family)
+    for scenario in scenarios:
+        print(f"{scenario.id}\t{scenario.name}\t{scenario.task}")
+    return 0
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _summarize(runs_dir: str, as_json: bool = False) -> int:
@@ -415,11 +503,23 @@ def _eval(args: argparse.Namespace) -> int:
         action_count = 0
         try:
             while action_count < max_steps:
+                previous_observation = observation
+                candidate_actions = env.candidate_actions()
                 action = agent.act(observation)
+                preview = env.preview(action)
                 result = env.step(action)
                 action_count += 1
                 observation = result.observation
-                artifacts.log_step(action_count, observation, action, result.reward, result.info)
+                artifacts.log_step(
+                    action_count,
+                    observation,
+                    action,
+                    result.reward,
+                    result.info,
+                    previous_observation=previous_observation,
+                    candidate_actions=candidate_actions,
+                    preview=preview,
+                )
                 if result.terminated or result.truncated:
                     break
             summary = _summary(args, seed, action_count, observation, artifacts.run_dir)

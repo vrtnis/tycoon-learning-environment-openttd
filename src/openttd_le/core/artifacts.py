@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from openttd_le.core.schemas import EPISODE_TRACE_SCHEMA, REPLAY_SCHEMA, schema_manifest
+
 
 class RunArtifacts:
     def __init__(self, root: Path, scenario_id: str, agent_name: str, seed: int) -> None:
@@ -14,9 +16,15 @@ class RunArtifacts:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "screenshots").mkdir(exist_ok=True)
         self.actions_path = self.run_dir / "actions.jsonl"
+        self.episode_path = self.run_dir / "episode.jsonl"
+        self.observations_path = self.run_dir / "observations.jsonl"
+        self.candidate_actions_path = self.run_dir / "candidate_actions.jsonl"
+        self.rewards_path = self.run_dir / "rewards.jsonl"
+        self.diagnostics_path = self.run_dir / "diagnostics.jsonl"
         self.metrics_path = self.run_dir / "metrics.csv"
         self.trace_path = self.run_dir / "agent_trace.md"
         self._metrics_rows: list[dict[str, Any]] = []
+        self._replay_steps: list[dict[str, Any]] = []
 
     def log_step(
         self,
@@ -25,6 +33,10 @@ class RunArtifacts:
         action: dict[str, Any],
         reward: float,
         info: dict[str, Any],
+        *,
+        previous_observation: dict[str, Any] | None = None,
+        candidate_actions: list[dict[str, Any]] | None = None,
+        preview: dict[str, Any] | None = None,
     ) -> None:
         row = {
             "step": step,
@@ -36,6 +48,59 @@ class RunArtifacts:
         }
         with self.actions_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+        if previous_observation is not None:
+            _append_jsonl(
+                self.observations_path,
+                {
+                    "step": step,
+                    "phase": "before",
+                    "observation": _strip_candidate_actions(previous_observation),
+                },
+            )
+        _append_jsonl(
+            self.observations_path,
+            {
+                "step": step,
+                "phase": "after",
+                "observation": _strip_candidate_actions(observation),
+            },
+        )
+        _append_jsonl(
+            self.candidate_actions_path,
+            {
+                "step": step,
+                "candidate_actions": candidate_actions if candidate_actions is not None else previous_observation.get("candidate_actions", []) if previous_observation else [],
+            },
+        )
+        reward_details = info.get("reward_details", {"reward": round(reward, 4), "components": {}})
+        _append_jsonl(self.rewards_path, {"step": step, **reward_details})
+        diagnostics = {
+            "step": step,
+            "preview": preview or {},
+            "reward_diagnostics": reward_details.get("diagnostics", []),
+            "last_event": info.get("last_event"),
+        }
+        _append_jsonl(self.diagnostics_path, diagnostics)
+        episode_row = {
+            "schema": EPISODE_TRACE_SCHEMA,
+            "step": step,
+            "before": _strip_candidate_actions(previous_observation) if previous_observation else None,
+            "candidate_actions": candidate_actions if candidate_actions is not None else previous_observation.get("candidate_actions", []) if previous_observation else [],
+            "chosen_action": action,
+            "preview": preview or {},
+            "after": _strip_candidate_actions(observation),
+            "reward": reward_details,
+            "info": info,
+        }
+        _append_jsonl(self.episode_path, episode_row)
+        self._replay_steps.append(
+            {
+                "step": step,
+                "action": action,
+                "reward": reward_details,
+                "last_event": info.get("last_event"),
+            }
+        )
         metrics = observation["metrics"]
         self._metrics_rows.append(
             {
@@ -60,6 +125,15 @@ class RunArtifacts:
     ) -> None:
         _write_json(self.run_dir / "summary.json", summary)
         _write_json(self.run_dir / "final_state.json", final_state)
+        _write_json(
+            self.run_dir / "replay.json",
+            {
+                "schema": REPLAY_SCHEMA,
+                "schemas": schema_manifest(),
+                "summary": summary,
+                "steps": self._replay_steps,
+            },
+        )
         _write_metrics_csv(self.metrics_path, self._metrics_rows)
         _write_map_svg(self.run_dir / "screenshots" / "final_map.svg", final_observation)
         _write_trace(self.trace_path, summary, final_observation)
@@ -69,6 +143,17 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
         handle.write("\n")
+
+
+def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+
+
+def _strip_candidate_actions(observation: dict[str, Any] | None) -> dict[str, Any] | None:
+    if observation is None:
+        return None
+    return {key: value for key, value in observation.items() if key != "candidate_actions"}
 
 
 def _write_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:

@@ -5,6 +5,7 @@ import unittest
 from openttd_le.agents import GreedyAgent, RandomAgent
 from openttd_le.core.env import OpenTTDLEnv
 from openttd_le.core.scenarios import load_registry
+from openttd_le.core.schemas import CANDIDATE_ACTION_SCHEMA, OBSERVATION_SCHEMA
 
 
 class ScenarioTests(unittest.TestCase):
@@ -15,6 +16,34 @@ class ScenarioTests(unittest.TestCase):
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_observation_exposes_candidate_action_frontier(self) -> None:
+        env = OpenTTDLEnv()
+        obs, _ = env.reset("coal_easy_001", seed=1)
+
+        candidates = obs["candidate_actions"]
+
+        self.assertEqual(obs["schema"], OBSERVATION_SCHEMA)
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0]["schema"], CANDIDATE_ACTION_SCHEMA)
+        self.assertIn("action", candidates[0])
+        self.assertIn("estimates", candidates[0])
+        self.assertTrue(any(item["kind"] == "build_route" for item in candidates))
+        env.close()
+
+    def test_preview_and_reward_details_are_available(self) -> None:
+        env = OpenTTDLEnv()
+        obs, _ = env.reset("coal_easy_001", seed=1)
+        action = next(item["action"] for item in obs["candidate_actions"] if item["kind"] == "build_route")
+
+        preview = env.preview(action)
+        result = env.step(action)
+
+        self.assertIn("components", preview)
+        self.assertIn("reward_details", result.info)
+        self.assertIn("components", result.info["reward_details"])
+        self.assertIn("route_built", result.info["reward_details"]["milestones"])
+        env.close()
+
     def test_greedy_agent_delivers_cargo(self) -> None:
         env = OpenTTDLEnv()
         obs, _ = env.reset("coal_easy_001", seed=1)

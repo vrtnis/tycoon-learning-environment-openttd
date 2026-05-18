@@ -9,6 +9,97 @@ The first backend is a deterministic logistics simulator used to exercise the
 environment loop. The real OpenTTD backend is intentionally isolated behind the
 same interface and is the next integration step.
 
+## v0.3 Researcher MVP
+
+OpenTTD-LE now exposes the first research-instrument layer for local agent
+work. Observations include a `candidate_actions` frontier with executable
+actions, feasibility flags, route economics, objective relevance, and ranking
+metadata. The environment also exposes:
+
+```python
+env.candidate_actions()
+env.preview({"type": "build_route", ...})
+result = env.step(action)
+result.info["reward_details"]
+```
+
+This makes the local SDK useful for one-shot agents, best-of-N rerankers,
+search, value-model training, replay analysis, and offline relabeling. Every
+`eval` run writes research traces in addition to the original artifacts:
+
+- `episode.jsonl` with before/after observations, candidates, chosen action,
+  preview, reward details, and step info
+- `candidate_actions.jsonl`
+- `observations.jsonl`
+- `rewards.jsonl`
+- `diagnostics.jsonl`
+- `replay.json`
+
+Export traces for offline training or analysis:
+
+```bash
+openttd-le export-dataset --run runs/<run_dir> --out dataset.jsonl
+openttd-le export-dataset --run runs --out dataset.jsonl
+openttd-le export-dataset --run runs --out dataset.parquet --format parquet
+```
+
+Run the canonical local benchmark suite:
+
+```bash
+openttd-le benchmark-core --suite core --agents random,greedy,candidate_rank,preview_rerank --seeds 1,2,3 --out runs_core
+```
+
+Use the optional Gymnasium adapter:
+
+```python
+from openttd_le.adapters.gymnasium import OpenTTDLEGymEnv
+
+env = OpenTTDLEGymEnv(task_id="coal_easy_001")
+obs, info = env.reset(seed=1)
+obs, reward, terminated, truncated, info = env.step(0)
+```
+
+## v0.4 Procedural Benchmarking
+
+The fixed lab-play suite is useful for debugging but can saturate quickly.
+`v0.4` adds deterministic procedural scenario families with explicit
+`train` / `dev` / `test` splits:
+
+- `single_route`: generated source-to-sink cargo problems
+- `low_cash`: financing-constrained route starts
+- `multi_route`: mixed two-route expansion maps
+- `chain`: two-stage raw-to-processed logistics topologies
+
+List generated tasks:
+
+```bash
+openttd-le list-procedural-scenarios --split dev --count-per-family 2
+```
+
+Run the anti-saturation benchmark suite:
+
+```bash
+openttd-le benchmark-core --suite procedural --split dev --agents candidate_rank,preview_rerank --seeds 1,2,3 --out runs_procedural
+openttd-le benchmark-core --suite procedural --split test --agents my_agent --seeds 1,2,3 --out runs_test
+```
+
+Generated scenarios use stable IDs such as `proc_dev_chain_001` and include
+split/family/seed tags in observations and artifacts.
+
+## Async Replay Rendering
+
+Core/toy and procedural runs already write `episode.jsonl` and `replay.json`.
+Render them later without rerunning the agent:
+
+```bash
+openttd-le render-core-replay --episode runs/<run_dir>/episode.jsonl --out frames/
+openttd-le render-core-replay --replay runs/<run_dir>/replay.json --out frames/
+openttd-le render-core-replay --replay runs/<run_dir>/replay.json --out replay.mp4 --fps 1
+```
+
+SVG frames and `index.html` are always produced. MP4 output is optional and
+requires `ffmpeg` on `PATH`; if unavailable, the command still writes frames.
+
 ## Quickstart
 
 ```bash
