@@ -17,7 +17,21 @@ class ReplayRenderTests(unittest.TestCase):
             stdout = StringIO()
             with redirect_stdout(stdout):
                 self.assertEqual(
-                    main(["eval", "--agent", "candidate_rank", "--scenario", "coal_easy_001", "--out", tmp, "--max-steps", "2"]),
+                    main(
+                        [
+                            "eval",
+                            "--agent",
+                            "candidate_rank",
+                            "--backend",
+                            "toy",
+                            "--scenario",
+                            "coal_easy_001",
+                            "--out",
+                            tmp,
+                            "--max-steps",
+                            "2",
+                        ]
+                    ),
                     0,
                 )
             summary = json.loads(stdout.getvalue().splitlines()[0])
@@ -35,7 +49,21 @@ class ReplayRenderTests(unittest.TestCase):
             stdout = StringIO()
             with redirect_stdout(stdout):
                 self.assertEqual(
-                    main(["eval", "--agent", "candidate_rank", "--scenario", "coal_easy_001", "--out", tmp, "--max-steps", "1"]),
+                    main(
+                        [
+                            "eval",
+                            "--agent",
+                            "candidate_rank",
+                            "--backend",
+                            "toy",
+                            "--scenario",
+                            "coal_easy_001",
+                            "--out",
+                            tmp,
+                            "--max-steps",
+                            "1",
+                        ]
+                    ),
                     0,
                 )
             summary = json.loads(stdout.getvalue().splitlines()[0])

@@ -32,11 +32,19 @@ class OpenTTDLEGameScript extends GSController {
     function ExecuteWait(action);
     function FindRoute(route_id);
     function FindCargoForPair(source_id, destination_id, preferred_cargo);
-    function FindRoadStopNearIndustry(industry_id, target_tile);
+    function FindRoadStopNearIndustry(industry_id, target_tile, road_vehicle_type);
+    function FindRoadStopCandidatesNearIndustry(industry_id, target_tile, road_vehicle_type, limit);
+    function AddRoadStopCandidateSorted(candidates, candidate, limit);
+    function RoadFrontCandidates(tile, target_tile);
+    function CanBuildRoadStop(tile, front, road_vehicle_type);
+    function FindRoadRoutePlan(source_id, destination_id, max_path_tiles, road_vehicle_type);
     function ChooseFrontTile(tile, target_tile);
     function FindRoadPath(start_tile, end_tile);
+    function CanUseRoadEdge(tile_a, tile_b, start_tile, end_tile);
+    function IsRoadPathBuildable(path);
     function PathTileUsable(tile, start_tile, end_tile);
     function TileKey(tile);
+    function Abs(value);
     function BuildRoadPath(path);
     function CountRoadConnections(path);
     function FindAndBuildDepot(path);
@@ -651,11 +659,24 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
         };
     }
 
-    local source_stop = this.FindRoadStopNearIndustry(source_id, destination_tile);
-    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "source_stop_checked", found = source_stop != null });
-    local destination_stop = this.FindRoadStopNearIndustry(destination_id, source_tile);
-    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "destination_stop_checked", found = destination_stop != null });
-    if (source_stop == null || destination_stop == null) {
+    local max_physical_route_tiles = action.rawin("max_path_tiles") ? action.max_path_tiles : 40;
+    local road_vehicle_type = GSRoad.GetRoadVehicleTypeForCargo(cargo_id);
+    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "road_vehicle_type", road_vehicle_type = road_vehicle_type });
+    local route_plan = this.FindRoadRoutePlan(source_id, destination_id, max_physical_route_tiles, road_vehicle_type);
+    if (debug_action) {
+        GSAdmin.Send({
+            type = "debug",
+            step = this.step,
+            phase = "route_plan_checked",
+            feasible = route_plan.feasible,
+            error = route_plan.error,
+            source_candidates = route_plan.source_candidates,
+            destination_candidates = route_plan.destination_candidates,
+            pairs_checked = route_plan.pairs_checked,
+            path_tiles = route_plan.path_tiles
+        });
+    }
+    if (!route_plan.feasible) {
         if (allow_virtual && !preview_roads) {
             local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, 12, 1800);
             return {
@@ -664,44 +685,17 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
                 action_type = action_type,
                 route_id = virtual_route.route_id,
                 mode = "virtual_operational_route",
-                warning = "no_station_site",
+                warning = route_plan.error,
                 cargo_label = GSCargo.GetCargoLabel(cargo_id),
                 cargo_name = GSCargo.GetName(cargo_id),
                 source_id = source_id,
                 source_name = GSIndustry.GetName(source_id),
                 destination_id = destination_id,
                 destination_name = GSIndustry.GetName(destination_id),
-                source_stop_found = source_stop != null,
-                destination_stop_found = destination_stop != null,
-                fallback_road_segments = 0,
-                vehicles = 0,
-                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
-                virtual_profit_rate = virtual_route.virtual_profit_rate
-            };
-        }
-        GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 250000, GSCompany.EXPENSES_OTHER, source_tile);
-        this.ScrollVisible(source_tile);
-        local fallback_source_built = this.BuildRoadBurstNear(source_tile, label + " source fallback");
-        this.ScrollVisible(destination_tile);
-        local fallback_destination_built = this.BuildRoadBurstNear(destination_tile, label + " destination fallback");
-        if (allow_virtual) {
-            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_tile, destination_tile, 12, 1800);
-            return {
-                type = "result",
-                step = this.step,
-                action_type = action_type,
-                route_id = virtual_route.route_id,
-                mode = "virtual_operational_route",
-                warning = "no_station_site",
-                cargo_label = GSCargo.GetCargoLabel(cargo_id),
-                cargo_name = GSCargo.GetName(cargo_id),
-                source_id = source_id,
-                source_name = GSIndustry.GetName(source_id),
-                destination_id = destination_id,
-                destination_name = GSIndustry.GetName(destination_id),
-                source_stop_found = source_stop != null,
-                destination_stop_found = destination_stop != null,
-                fallback_road_segments = fallback_source_built + fallback_destination_built,
+                source_candidates = route_plan.source_candidates,
+                destination_candidates = route_plan.destination_candidates,
+                pairs_checked = route_plan.pairs_checked,
+                path_tiles = route_plan.path_tiles,
                 vehicles = 0,
                 virtual_delivery_rate = virtual_route.virtual_delivery_rate,
                 virtual_profit_rate = virtual_route.virtual_profit_rate
@@ -711,32 +705,33 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
             type = "result",
             step = this.step,
             action_type = action_type,
-            error = "no_station_site",
-            mode = "physical_fallback_roads",
+            error = route_plan.error,
             cargo_label = GSCargo.GetCargoLabel(cargo_id),
             cargo_name = GSCargo.GetName(cargo_id),
             source_id = source_id,
             source_name = GSIndustry.GetName(source_id),
             destination_id = destination_id,
             destination_name = GSIndustry.GetName(destination_id),
-            source_stop_found = source_stop != null,
-            destination_stop_found = destination_stop != null,
-            fallback_road_segments = fallback_source_built + fallback_destination_built,
-            source_fallback_road_segments = fallback_source_built,
-            destination_fallback_road_segments = fallback_destination_built
+            source_candidates = route_plan.source_candidates,
+            destination_candidates = route_plan.destination_candidates,
+            pairs_checked = route_plan.pairs_checked,
+            path_tiles = route_plan.path_tiles,
+            max_path_tiles = max_physical_route_tiles
         };
     }
+
+    local source_stop = route_plan.source_stop;
+    local destination_stop = route_plan.destination_stop;
+    local connector_path = route_plan.connector_path;
 
     GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 1000000, GSCompany.EXPENSES_OTHER, source_tile);
     GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "company_mode_started" });
 
-    local road_vehicle_type = GSRoad.GetRoadVehicleTypeForCargo(cargo_id);
-    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "road_vehicle_type", road_vehicle_type = road_vehicle_type });
     local source_station_built = false;
     {
         local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
-        source_station_built = GSRoad.BuildDriveThroughRoadStation(source_stop.tile, source_stop.front, road_vehicle_type, GSStation.STATION_NEW);
+        source_station_built = GSRoad.BuildRoadStation(source_stop.tile, source_stop.front, road_vehicle_type, GSStation.STATION_NEW);
     }
     if (!source_station_built) {
         return {
@@ -753,7 +748,7 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     local destination_station_built = false;
     {
         local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
-        destination_station_built = GSRoad.BuildDriveThroughRoadStation(destination_stop.tile, destination_stop.front, road_vehicle_type, GSStation.STATION_NEW);
+        destination_station_built = GSRoad.BuildRoadStation(destination_stop.tile, destination_stop.front, road_vehicle_type, GSStation.STATION_NEW);
     }
     if (!destination_station_built) {
         return {
@@ -766,84 +761,6 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     }
     local destination_station = GSStation.GetStationID(destination_stop.tile);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "destination_station_built", station = destination_station });
-
-    local connector_path = this.FindRoadPath(source_stop.front, destination_stop.front);
-    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "path_found", path_tiles = connector_path.len() });
-    if (connector_path.len() == 0) {
-        return { type = "result", step = this.step, action_type = action_type, error = "no_road_path" };
-    }
-    local max_physical_route_tiles = action.rawin("max_path_tiles") ? action.max_path_tiles : 40;
-    if (connector_path.len() > max_physical_route_tiles) {
-        if (allow_virtual && !preview_roads) {
-            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_stop.tile, destination_stop.tile, 16, 2400);
-            return {
-                type = "result",
-                step = this.step,
-                action_type = action_type,
-                route_id = virtual_route.route_id,
-                mode = "virtual_operational_route",
-                warning = "path_too_long_for_single_macro",
-                cargo_label = GSCargo.GetCargoLabel(cargo_id),
-                cargo_name = GSCargo.GetName(cargo_id),
-                source_id = source_id,
-                source_name = GSIndustry.GetName(source_id),
-                destination_id = destination_id,
-                destination_name = GSIndustry.GetName(destination_id),
-                path_tiles = connector_path.len(),
-                max_path_tiles = max_physical_route_tiles,
-                fallback_road_segments = 0,
-                vehicles = 0,
-                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
-                virtual_profit_rate = virtual_route.virtual_profit_rate
-            };
-        }
-        GSCompany.ChangeBankBalance(GSCompany.COMPANY_FIRST, 250000, GSCompany.EXPENSES_OTHER, source_tile);
-        this.ScrollVisible(source_stop.tile);
-        local preview_source_built = this.BuildRoadBurstNear(source_stop.tile, label + " source preview");
-        this.ScrollVisible(destination_stop.tile);
-        local preview_destination_built = this.BuildRoadBurstNear(destination_stop.tile, label + " destination preview");
-        if (allow_virtual) {
-            local virtual_route = this.CreateVirtualRoute(source_id, destination_id, cargo_id, source_stop.tile, destination_stop.tile, 16, 2400);
-            return {
-                type = "result",
-                step = this.step,
-                action_type = action_type,
-                route_id = virtual_route.route_id,
-                mode = "virtual_operational_route",
-                warning = "path_too_long_for_single_macro",
-                cargo_label = GSCargo.GetCargoLabel(cargo_id),
-                cargo_name = GSCargo.GetName(cargo_id),
-                source_id = source_id,
-                source_name = GSIndustry.GetName(source_id),
-                destination_id = destination_id,
-                destination_name = GSIndustry.GetName(destination_id),
-                path_tiles = connector_path.len(),
-                max_path_tiles = max_physical_route_tiles,
-                fallback_road_segments = preview_source_built + preview_destination_built,
-                vehicles = 0,
-                virtual_delivery_rate = virtual_route.virtual_delivery_rate,
-                virtual_profit_rate = virtual_route.virtual_profit_rate
-            };
-        }
-        return {
-            type = "result",
-            step = this.step,
-            action_type = action_type,
-            error = "path_too_long_for_single_macro",
-            mode = "physical_preview_roads",
-            cargo_label = GSCargo.GetCargoLabel(cargo_id),
-            cargo_name = GSCargo.GetName(cargo_id),
-            source_id = source_id,
-            source_name = GSIndustry.GetName(source_id),
-            destination_id = destination_id,
-            destination_name = GSIndustry.GetName(destination_id),
-            path_tiles = connector_path.len(),
-            max_path_tiles = max_physical_route_tiles,
-            fallback_road_segments = preview_source_built + preview_destination_built,
-            source_fallback_road_segments = preview_source_built,
-            destination_fallback_road_segments = preview_destination_built
-        };
-    }
     local path = [source_stop.tile];
     foreach (tile in connector_path) path.append(tile);
     path.append(destination_stop.tile);
@@ -855,8 +772,11 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
     local road_segments = this.BuildRoadPath(path);
     if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "road_path_built", road_segments = road_segments });
     local connected_segments = this.CountRoadConnections(path);
-    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "road_path_connected", connected_segments = connected_segments, required_segments = path.len() - 1 });
-    if (connected_segments < path.len() - 1) {
+    local required_segments = path.len() - 1;
+    local tolerated_missing_segments = 2;
+    local connection_warning = connected_segments < required_segments;
+    if (debug_action) GSAdmin.Send({ type = "debug", step = this.step, phase = "road_path_connected", connected_segments = connected_segments, required_segments = required_segments });
+    if (connected_segments + tolerated_missing_segments < required_segments) {
         return {
             type = "result",
             step = this.step,
@@ -864,7 +784,7 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
             error = "road_connection_failed",
             road_segments = road_segments,
             connected_segments = connected_segments,
-            required_segments = path.len() - 1,
+            required_segments = required_segments,
             path_tiles = path.len()
         };
     }
@@ -919,10 +839,21 @@ function OpenTTDLEGameScript::ExecuteCargoRoute(action, action_type)
         destination_id = destination_id,
         destination_name = GSIndustry.GetName(destination_id),
         road_segments = road_segments,
+        connected_segments = connected_segments,
+        required_segments = required_segments,
+        connection_warning = connection_warning,
         path_tiles = path.len(),
+        source_tile = source_stop.tile,
+        source_front = source_stop.front,
+        source_stop_distance = source_stop.distance_to_industry,
+        destination_tile = destination_stop.tile,
+        destination_front = destination_stop.front,
+        destination_stop_distance = destination_stop.distance_to_industry,
         source_station = source_station,
         destination_station = destination_station,
         depot_tile = depot_tile,
+        depot_front = GSRoad.GetRoadDepotFrontTile(depot_tile),
+        depot_connected = GSRoad.AreRoadTilesConnected(depot_tile, GSRoad.GetRoadDepotFrontTile(depot_tile)),
         engine_id = engine_id,
         engine_name = GSEngine.GetName(engine_id),
         vehicles = vehicles.len()
@@ -1043,25 +974,199 @@ function OpenTTDLEGameScript::FindCargoForPair(source_id, destination_id, prefer
     return -1;
 }
 
-function OpenTTDLEGameScript::FindRoadStopNearIndustry(industry_id, target_tile)
+function OpenTTDLEGameScript::FindRoadStopNearIndustry(industry_id, target_tile, road_vehicle_type)
 {
+    local candidates = this.FindRoadStopCandidatesNearIndustry(industry_id, target_tile, road_vehicle_type, 1);
+    if (candidates.len() == 0) return null;
+    return candidates[0];
+}
+
+function OpenTTDLEGameScript::FindRoadStopCandidatesNearIndustry(industry_id, target_tile, road_vehicle_type, limit)
+{
+    local candidates = [];
+    local seen = {};
     local center = GSIndustry.GetLocation(industry_id);
     local base_x = GSMap.GetTileX(center);
     local base_y = GSMap.GetTileY(center);
     local coverage = GSStation.GetCoverageRadius(GSStation.STATION_TRUCK_STOP);
-    for (local radius = 1; radius <= coverage; radius++) {
+    GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
+    for (local radius = 0; radius <= coverage + 2; radius++) {
         for (local dx = -radius; dx <= radius; dx++) {
             for (local dy = -radius; dy <= radius; dy++) {
+                if (this.Abs(dx) != radius && this.Abs(dy) != radius) continue;
                 local tile = GSMap.GetTileIndex(base_x + dx, base_y + dy);
                 if (!GSMap.IsValidTile(tile)) continue;
-                if (!GSTile.IsBuildable(tile)) continue;
+                local tile_key = this.TileKey(tile);
+                if (seen.rawin(tile_key)) continue;
+                seen[tile_key] <- true;
                 if (GSIndustry.GetDistanceManhattanToTile(industry_id, tile) > coverage) continue;
-                local front = this.ChooseFrontTile(tile, target_tile);
-                if (front != null) return { tile = tile, front = front };
+                local fronts = this.RoadFrontCandidates(tile, target_tile);
+                foreach (front in fronts) {
+                    if (!GSMap.IsValidTile(front)) continue;
+                    if (front == tile) continue;
+                    if (!this.PathTileUsable(front, tile, target_tile)) continue;
+                    if (!this.CanBuildRoadStop(tile, front, road_vehicle_type)) continue;
+                    this.AddRoadStopCandidateSorted(candidates, {
+                        tile = tile,
+                        front = front,
+                        distance_to_target = GSMap.DistanceManhattan(front, target_tile),
+                        distance_to_industry = GSIndustry.GetDistanceManhattanToTile(industry_id, tile),
+                        score = (GSIndustry.GetDistanceManhattanToTile(industry_id, tile) * 1000) + GSMap.DistanceManhattan(front, target_tile)
+                    }, limit);
+                }
             }
         }
     }
-    return null;
+    return candidates;
+}
+
+function OpenTTDLEGameScript::AddRoadStopCandidateSorted(candidates, candidate, limit)
+{
+    local pos = candidates.len();
+    for (local i = 0; i < candidates.len(); i++) {
+        if (candidate.score < candidates[i].score) {
+            pos = i;
+            break;
+        }
+    }
+    candidates.insert(pos, candidate);
+    if (candidates.len() > limit) candidates.remove(limit);
+}
+
+function OpenTTDLEGameScript::RoadFrontCandidates(tile, target_tile)
+{
+    local x = GSMap.GetTileX(tile);
+    local y = GSMap.GetTileY(tile);
+    local tx = GSMap.GetTileX(target_tile);
+    local ty = GSMap.GetTileY(target_tile);
+    local dx = tx - x;
+    local dy = ty - y;
+    local candidates = [];
+    local seen = {};
+    local ordered_dirs = [];
+    if (this.Abs(dx) >= this.Abs(dy)) {
+        if (dx < 0) ordered_dirs.append([-1, 0]);
+        if (dx > 0) ordered_dirs.append([1, 0]);
+        if (dy < 0) ordered_dirs.append([0, -1]);
+        if (dy > 0) ordered_dirs.append([0, 1]);
+    } else {
+        if (dy < 0) ordered_dirs.append([0, -1]);
+        if (dy > 0) ordered_dirs.append([0, 1]);
+        if (dx < 0) ordered_dirs.append([-1, 0]);
+        if (dx > 0) ordered_dirs.append([1, 0]);
+    }
+    ordered_dirs.append([1, 0]);
+    ordered_dirs.append([-1, 0]);
+    ordered_dirs.append([0, 1]);
+    ordered_dirs.append([0, -1]);
+    foreach (dir in ordered_dirs) {
+        local candidate = GSMap.GetTileIndex(x + dir[0], y + dir[1]);
+        if (!GSMap.IsValidTile(candidate)) continue;
+        local key = this.TileKey(candidate);
+        if (seen.rawin(key)) continue;
+        seen[key] <- true;
+        candidates.append(candidate);
+    }
+    return candidates;
+}
+
+function OpenTTDLEGameScript::CanBuildRoadStop(tile, front, road_vehicle_type)
+{
+    local ok = false;
+    {
+        local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
+        local test_mode = GSTestMode();
+        GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
+        ok = GSRoad.BuildRoadStation(tile, front, road_vehicle_type, GSStation.STATION_NEW);
+    }
+    return ok;
+}
+
+function OpenTTDLEGameScript::FindRoadRoutePlan(source_id, destination_id, max_path_tiles, road_vehicle_type)
+{
+    local source_tile = GSIndustry.GetLocation(source_id);
+    local destination_tile = GSIndustry.GetLocation(destination_id);
+    local source_candidates = this.FindRoadStopCandidatesNearIndustry(source_id, destination_tile, road_vehicle_type, 6);
+    local destination_candidates = this.FindRoadStopCandidatesNearIndustry(destination_id, source_tile, road_vehicle_type, 6);
+    local pairs_checked = 0;
+    local best_source = null;
+    local best_destination = null;
+    local best_path = [];
+    local best_len = 999999;
+    local best_over_limit = 999999;
+
+    if (source_candidates.len() == 0) {
+        return {
+            feasible = false,
+            error = "no_source_station_site",
+            source_candidates = 0,
+            destination_candidates = destination_candidates.len(),
+            pairs_checked = 0,
+            path_tiles = 0,
+            source_stop = null,
+            destination_stop = null,
+            connector_path = []
+        };
+    }
+    if (destination_candidates.len() == 0) {
+        return {
+            feasible = false,
+            error = "no_destination_station_site",
+            source_candidates = source_candidates.len(),
+            destination_candidates = 0,
+            pairs_checked = 0,
+            path_tiles = 0,
+            source_stop = null,
+            destination_stop = null,
+            connector_path = []
+        };
+    }
+
+    foreach (source_stop in source_candidates) {
+        foreach (destination_stop in destination_candidates) {
+            pairs_checked++;
+            local connector_path = this.FindRoadPath(source_stop.front, destination_stop.front);
+            if (connector_path.len() == 0) continue;
+            if (!this.IsRoadPathBuildable(connector_path)) continue;
+            local path_tiles = connector_path.len() + 2;
+            if (path_tiles < best_over_limit) best_over_limit = path_tiles;
+            if (path_tiles > max_path_tiles) continue;
+            if (path_tiles < best_len) {
+                best_len = path_tiles;
+                best_source = source_stop;
+                best_destination = destination_stop;
+                best_path = connector_path;
+            }
+        }
+    }
+
+    if (best_source == null || best_destination == null) {
+        local error = best_over_limit < 999999 ? "path_too_long_for_single_macro" : "no_path_between_station_candidates";
+        local path_tiles = best_over_limit < 999999 ? best_over_limit : 0;
+        return {
+            feasible = false,
+            error = error,
+            source_candidates = source_candidates.len(),
+            destination_candidates = destination_candidates.len(),
+            pairs_checked = pairs_checked,
+            path_tiles = path_tiles,
+            source_stop = null,
+            destination_stop = null,
+            connector_path = []
+        };
+    }
+
+    return {
+        feasible = true,
+        error = null,
+        source_candidates = source_candidates.len(),
+        destination_candidates = destination_candidates.len(),
+        pairs_checked = pairs_checked,
+        path_tiles = best_len,
+        source_stop = best_source,
+        destination_stop = best_destination,
+        connector_path = best_path
+    };
 }
 
 function OpenTTDLEGameScript::ChooseFrontTile(tile, target_tile)
@@ -1101,7 +1206,7 @@ function OpenTTDLEGameScript::FindRoadPath(start_tile, end_tile)
     previous[start_key] <- -1;
     local end_x = GSMap.GetTileX(end_tile);
     local end_y = GSMap.GetTileY(end_tile);
-    local max_nodes = 20000;
+    local max_nodes = 8000;
     local explored = 0;
 
     while (head < queue.len() && explored < max_nodes) {
@@ -1153,17 +1258,50 @@ function OpenTTDLEGameScript::FindRoadPath(start_tile, end_tile)
     return path;
 }
 
+function OpenTTDLEGameScript::IsRoadPathBuildable(path)
+{
+    if (path.len() <= 1) return false;
+    local start_tile = path[0];
+    local end_tile = path[path.len() - 1];
+    for (local i = 1; i < path.len(); i++) {
+        if (!this.CanUseRoadEdge(path[i - 1], path[i], start_tile, end_tile)) return false;
+    }
+    return true;
+}
+
+function OpenTTDLEGameScript::CanUseRoadEdge(tile_a, tile_b, start_tile, end_tile)
+{
+    if (!GSMap.IsValidTile(tile_a) || !GSMap.IsValidTile(tile_b)) return false;
+    if (GSRoad.AreRoadTilesConnected(tile_a, tile_b)) return true;
+    if (!this.PathTileUsable(tile_a, start_tile, end_tile)) return false;
+    if (!this.PathTileUsable(tile_b, start_tile, end_tile)) return false;
+    local ok = false;
+    {
+        local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
+        local test_mode = GSTestMode();
+        GSRoad.SetCurrentRoadType(GSRoad.ROADTYPE_ROAD);
+        ok = GSRoad.BuildRoad(tile_a, tile_b);
+    }
+    return ok;
+}
+
 function OpenTTDLEGameScript::PathTileUsable(tile, start_tile, end_tile)
 {
     if (!GSMap.IsValidTile(tile)) return false;
     if (tile == start_tile || tile == end_tile) return true;
-    if (GSRoad.IsRoadTile(tile) || GSRoad.IsRoadStationTile(tile) || GSRoad.IsRoadDepotTile(tile)) return true;
+    if (GSRoad.IsRoadStationTile(tile) || GSRoad.IsRoadDepotTile(tile)) return false;
+    if (GSRoad.IsRoadTile(tile)) return true;
     return GSTile.IsBuildable(tile);
 }
 
 function OpenTTDLEGameScript::TileKey(tile)
 {
     return GSMap.GetTileX(tile) + ":" + GSMap.GetTileY(tile);
+}
+
+function OpenTTDLEGameScript::Abs(value)
+{
+    return value < 0 ? -value : value;
 }
 
 function OpenTTDLEGameScript::BuildRoadPath(path)
@@ -1194,15 +1332,19 @@ function OpenTTDLEGameScript::CountRoadConnections(path)
 function OpenTTDLEGameScript::FindAndBuildDepot(path)
 {
     local dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-    local max_index = path.len() < 30 ? path.len() : 30;
-    for (local i = 0; i < max_index; i++) {
+    local max_index = path.len() - 1;
+    if (max_index > 30) max_index = 30;
+    local start_index = path.len() > 8 ? 4 : 1;
+    for (local i = start_index; i < max_index; i++) {
         local front = path[i];
+        if (GSRoad.IsRoadStationTile(front) || GSRoad.IsRoadDepotTile(front)) continue;
         local x = GSMap.GetTileX(front);
         local y = GSMap.GetTileY(front);
         foreach (dir in dirs) {
             local depot = GSMap.GetTileIndex(x + dir[0], y + dir[1]);
             if (!GSMap.IsValidTile(depot)) continue;
             if (!GSTile.IsBuildable(depot)) continue;
+            if (!this.CanUseRoadEdge(front, depot, front, depot)) continue;
             local built = false;
             {
                 local company_mode = GSCompanyMode(GSCompany.COMPANY_FIRST);
@@ -1210,6 +1352,7 @@ function OpenTTDLEGameScript::FindAndBuildDepot(path)
                 built = GSRoad.BuildRoadDepot(depot, front);
             }
             if (built) {
+                this.TryRoad(depot, front);
                 GSSign.BuildSign(depot, "GPT cargo route depot");
                 return depot;
             }

@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
-from openttd_le.backends.live import _choose_action, _choose_coal_action, _live_config, _parse_json, _with_client_name
+from openttd_le.backends.live import (
+    _choose_action,
+    _choose_coal_action,
+    _find_distinct_free_ports,
+    _live_config,
+    _new_run_dir,
+    _parse_json,
+    _recording_window_title,
+    _with_client_name,
+)
 
 
 class LiveBackendTests(unittest.TestCase):
@@ -53,6 +64,23 @@ class LiveBackendTests(unittest.TestCase):
             allow_heuristic=True,
         )
         self.assertEqual(wait["type"], "wait")
+
+    def test_recording_window_title_parses_capture_sources(self) -> None:
+        self.assertEqual(_recording_window_title("window-region=OpenTTD 15.3"), "OpenTTD 15.3")
+        self.assertEqual(_recording_window_title("title=OpenTTD Replay"), "OpenTTD Replay")
+        self.assertIsNone(_recording_window_title("desktop"))
+
+    def test_new_run_dir_avoids_same_second_collisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = _new_run_dir(Path(tmp), suffix="firs_env")
+            second = _new_run_dir(Path(tmp), suffix="firs_env")
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_find_distinct_free_ports_does_not_return_same_port(self) -> None:
+        game_port, admin_port = _find_distinct_free_ports()
+        self.assertNotEqual(game_port, admin_port)
 
 
 if __name__ == "__main__":

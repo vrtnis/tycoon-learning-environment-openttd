@@ -7,6 +7,20 @@ from statistics import median
 from typing import Any
 
 
+ROUTE_BUILDER_INFEASIBLE_REASONS = {
+    "no_source_station_site",
+    "no_destination_station_site",
+    "no_path_between_station_candidates",
+    "path_too_long_for_single_macro",
+    "no_road_path",
+    "no_matching_cargo",
+    "no_road_engine",
+    "no_road_vehicle_for_cargo",
+    "source_not_road_compatible",
+    "destination_not_road_compatible",
+}
+
+
 @dataclass(frozen=True)
 class BenchmarkTask:
     id: str
@@ -18,6 +32,9 @@ class BenchmarkTask:
     success: dict[str, Any]
     objectives: list[dict[str, Any]]
     prompt: str = ""
+    split: str = "dev"
+    difficulty: str = "medium"
+    tags: tuple[str, ...] = ()
 
 
 def default_benchmark_path() -> Path:
@@ -38,6 +55,9 @@ def load_benchmark_tasks(path: str | Path | None = None) -> list[BenchmarkTask]:
             success=dict(item.get("success", {})),
             objectives=list(item.get("objectives", [])),
             prompt=str(item.get("prompt", "")),
+            split=str(item.get("split", "dev")),
+            difficulty=str(item.get("difficulty", "medium")),
+            tags=tuple(str(tag) for tag in item.get("tags", [])),
         )
         for item in data.get("tasks", [])
     ]
@@ -63,6 +83,9 @@ def task_to_workbook_meta(task: BenchmarkTask, workbook_meta: dict[str, Any]) ->
             "id": task.id,
             "mode": task.mode,
             "description": task.description,
+            "split": task.split,
+            "difficulty": task.difficulty,
+            "tags": list(task.tags),
             "success": task.success,
             "prompt": task.prompt,
         },
@@ -100,33 +123,56 @@ def aggregate_route_builder_attempts(
             "build_successes": 0,
             "active_successes": 0,
             "operational_successes": 0,
+            "feasible_attempts": 0,
+            "feasible_operational_successes": 0,
             "build_success_rate": 0.0,
             "active_success_rate": 0.0,
             "operational_success_rate": 0.0,
+            "feasible_operational_success_rate": 0.0,
             "target_success_rate": target_success_rate,
             "level1_pass": False,
+            "feasible_level1_pass": False,
             "failure_counts": {},
+            "infeasible_failure_counts": {},
         }
     build_successes = sum(1 for item in attempts if item.get("build_success"))
     active_successes = sum(1 for item in attempts if item.get("active_success"))
     operational_successes = sum(1 for item in attempts if item.get("operational_success"))
     failure_counts: dict[str, int] = {}
+    infeasible_failure_counts: dict[str, int] = {}
+    feasible_attempts = 0
+    feasible_operational_successes = 0
     for item in attempts:
+        reason = str(item.get("failure_reason") or item.get("error") or "")
+        infeasible = bool(reason and reason in ROUTE_BUILDER_INFEASIBLE_REASONS)
+        if infeasible:
+            infeasible_failure_counts[reason] = infeasible_failure_counts.get(reason, 0) + 1
+        else:
+            feasible_attempts += 1
+            if item.get("operational_success"):
+                feasible_operational_successes += 1
         if item.get("operational_success"):
             continue
-        reason = str(item.get("failure_reason") or item.get("error") or "not_operational")
+        reason = reason or "not_operational"
         failure_counts[reason] = failure_counts.get(reason, 0) + 1
     count = len(attempts)
     operational_rate = operational_successes / count
+    feasible_operational_rate = feasible_operational_successes / feasible_attempts if feasible_attempts else 0.0
     return {
         "attempts": count,
         "build_successes": build_successes,
         "active_successes": active_successes,
         "operational_successes": operational_successes,
+        "feasible_attempts": feasible_attempts,
+        "feasible_operational_successes": feasible_operational_successes,
+        "infeasible_attempts": count - feasible_attempts,
         "build_success_rate": round(build_successes / count, 3),
         "active_success_rate": round(active_successes / count, 3),
         "operational_success_rate": round(operational_rate, 3),
+        "feasible_operational_success_rate": round(feasible_operational_rate, 3),
         "target_success_rate": target_success_rate,
         "level1_pass": operational_rate >= target_success_rate,
+        "feasible_level1_pass": feasible_attempts > 0 and feasible_operational_rate >= target_success_rate,
         "failure_counts": dict(sorted(failure_counts.items())),
+        "infeasible_failure_counts": dict(sorted(infeasible_failure_counts.items())),
     }

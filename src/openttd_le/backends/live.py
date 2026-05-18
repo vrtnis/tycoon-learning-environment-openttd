@@ -24,13 +24,14 @@ from openttd_le.backends.visual import ensure_opengfx, install_live_bridge
 from openttd_le.core.types import EnvError
 from openttd_le.research.api import Prototype, api_from_observation, get_cargo_chains, get_finance, get_industries, get_routes
 from openttd_le.research.benchmarks import (
+    ROUTE_BUILDER_INFEASIBLE_REASONS,
     aggregate_route_builder_attempts,
     aggregate_runs,
     select_task,
     task_to_workbook_meta,
 )
 from openttd_le.research.scoring import CARGO_VALUE, score_snapshot
-from openttd_le.replay import load_replay, replay_actions
+from openttd_le.replay import export_replay, load_replay, replay_actions
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import read_firs_ops_workbook
 
@@ -259,7 +260,7 @@ class FIRSReplSession:
         self.admin.send_gamescript({"type": "action", "action": action})
         try:
             result = _next_result(self.admin, timeout=90.0)
-            observation = _next_observation(self.admin, timeout=90.0)
+            observation = _next_observation(self.admin, timeout=90.0, reasons=("after_action",))
         except Exception as exc:
             result = {
                 "type": "result",
@@ -280,7 +281,7 @@ class FIRSReplSession:
 
     def observe(self) -> dict[str, Any]:
         self.admin.send_gamescript({"type": "observe"})
-        self.observation = _next_observation(self.admin, timeout=90.0)
+        self.observation = _next_observation(self.admin, timeout=90.0, reasons=("requested",))
         self._refresh_env()
         return self.observation
 
@@ -472,8 +473,7 @@ def launch_gpt_live(
     run_dir = _new_run_dir(Path(output_root))
     ensure_opengfx()
     installed = install_live_bridge()
-    game_port = _find_free_port(3979)
-    admin_port = _find_free_port(3977)
+    game_port, admin_port = _find_distinct_free_ports(3979, 3977)
     cfg_path = run_dir / "openttd.cfg"
     cfg_text = _live_config(seed, game_port, admin_port)
     cfg_path.write_text(cfg_text, encoding="ascii")
@@ -599,8 +599,7 @@ def launch_coal_objective(
     run_dir = _new_run_dir(Path(output_root), suffix="coal_objective")
     ensure_opengfx()
     installed = install_live_bridge()
-    game_port = _find_free_port(3979)
-    admin_port = _find_free_port(3977)
+    game_port, admin_port = _find_distinct_free_ports(3979, 3977)
     cfg_path = run_dir / "openttd.cfg"
     cfg_text = _live_config(seed, game_port, admin_port)
     cfg_path.write_text(cfg_text, encoding="ascii")
@@ -751,8 +750,7 @@ def launch_firs_live(
     run_dir = _new_run_dir(Path(output_root), suffix="firs_ops")
     ensure_opengfx()
     installed = install_live_bridge()
-    game_port = _find_free_port(3979)
-    admin_port = _find_free_port(3977)
+    game_port, admin_port = _find_distinct_free_ports(3979, 3977)
     cfg_text = render_firs_live_config(
         run_config=run_config,
         install=install,
@@ -845,6 +843,7 @@ def launch_firs_live(
         if record:
             capture_delay = min(2.0, max(0.0, start_delay))
             time.sleep(capture_delay)
+            _close_recording_overlays(record_source)
             recorder = _start_recording(gameplay_path, source=record_source)
             time.sleep(max(0.0, start_delay - capture_delay))
         else:
@@ -1008,8 +1007,7 @@ def launch_firs_replay(
     run_dir = _new_run_dir(Path(output_root), suffix="firs_replay")
     ensure_opengfx()
     installed = install_live_bridge()
-    game_port = _find_free_port(3979)
-    admin_port = _find_free_port(3977)
+    game_port, admin_port = _find_distinct_free_ports(3979, 3977)
     cfg_text = render_firs_live_config(
         run_config=run_config,
         install=install,
@@ -1101,6 +1099,7 @@ def launch_firs_replay(
         if record:
             capture_delay = min(2.0, max(0.0, start_delay))
             time.sleep(capture_delay)
+            _close_recording_overlays(record_source)
             recorder = _start_recording(gameplay_path, source=record_source)
             time.sleep(max(0.0, start_delay - capture_delay))
         else:
@@ -1189,6 +1188,7 @@ def launch_firs_research(
     steps: int = 32,
     benchmark_task: str | None = None,
     benchmark_file: Path | str | None = None,
+    seed: int | None = None,
     allow_heuristic: bool = False,
     step_delay: float = 0.0,
 ) -> dict[str, Any]:
@@ -1205,6 +1205,8 @@ def launch_firs_research(
             target_chain=tuple(task.objectives) or run_config.target_chain,
         )
         steps = task.steps if steps == 32 else steps
+    if seed is not None:
+        run_config = replace(run_config, seed=int(seed))
     exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
     if not exe or not Path(exe).exists():
         raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
@@ -1215,8 +1217,7 @@ def launch_firs_research(
     run_dir = _new_run_dir(Path(output_root), suffix="firs_research")
     ensure_opengfx()
     installed = install_live_bridge()
-    game_port = _find_free_port(3979)
-    admin_port = _find_free_port(3977)
+    game_port, admin_port = _find_distinct_free_ports(3979, 3977)
     cfg_text = render_firs_live_config(
         run_config=run_config,
         install=install,
@@ -1265,6 +1266,7 @@ def launch_firs_research(
     actions_path = run_dir / "actions.jsonl"
     summary_path = run_dir / "summary.json"
     report_path = run_dir / "report.xlsx"
+    replay_path = run_dir / "replay.json"
 
     admin = AdminClient("127.0.0.1", admin_port)
     final_observation: dict[str, Any] | None = None
@@ -1386,6 +1388,7 @@ def launch_firs_research(
         "observations": str(observations_path),
         "rewards": str(rewards_path),
         "actions": str(actions_path),
+        "replay": str(replay_path),
         "run_dir": str(run_dir),
         "workbook": str(workbook_path),
         "note": "Research-mode run: headless OpenTTD/FIRS with persistent Python REPL artifacts.",
@@ -1408,12 +1411,14 @@ def launch_firs_research(
         "actions": str(actions_path),
         "summary": str(summary_path),
         "report": str(report_path),
+        "replay": str(replay_path),
         "installed": installed,
         "firs_newgrf": str(install.newgrf_path),
         "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
         "server_command": server_cmd,
     }
     (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
+    export_replay(run_dir, replay_path)
     return launch_info
 
 
@@ -1486,8 +1491,7 @@ def launch_route_builder_benchmark(
     run_dir = _new_run_dir(Path(output_root), suffix="route_builder")
     ensure_opengfx()
     installed = install_live_bridge()
-    game_port = _find_free_port(3979)
-    admin_port = _find_free_port(3977)
+    game_port, admin_port = _find_distinct_free_ports(3979, 3977)
     cfg_text = render_firs_live_config(
         run_config=run_config,
         install=install,
@@ -1529,10 +1533,12 @@ def launch_route_builder_benchmark(
     )
 
     attempts_path = run_dir / "route_builder_attempts.jsonl"
+    skipped_path = run_dir / "route_builder_skipped.jsonl"
     observations_path = run_dir / "observations.jsonl"
     summary_path = run_dir / "summary.json"
     admin = AdminClient("127.0.0.1", admin_port)
     attempt_rows: list[dict[str, Any]] = []
+    skipped_rows: list[dict[str, Any]] = []
     final_observation: dict[str, Any] | None = None
     failed = True
     try:
@@ -1540,61 +1546,99 @@ def launch_route_builder_benchmark(
         admin.send_gamescript({"type": "observe"})
         observation = _next_observation(admin, timeout=90.0)
         final_observation = observation
-        pairs = _route_builder_candidate_pairs(observation, workbook_meta, limit=max(1, attempts))
+        candidate_limit = max(1, attempts * 5)
+        pairs = _route_builder_candidate_pairs(observation, workbook_meta, limit=candidate_limit)
         with (
             attempts_path.open("a", encoding="utf-8") as attempts_file,
+            skipped_path.open("a", encoding="utf-8") as skipped_file,
             observations_path.open("a", encoding="utf-8") as observations_file,
         ):
             _write_jsonl(observations_file, {"attempt": 0, "observation": observation})
-            for index, pair in enumerate(pairs[:attempts], start=1):
-                action = _build_action_from_pair(pair, route_vehicles, f"route builder benchmark {index}")
+            for probe_index, pair in enumerate(pairs, start=1):
+                if len(attempt_rows) >= attempts:
+                    break
+                construction_index = len(attempt_rows) + 1
+                action = _build_action_from_pair(pair, route_vehicles, f"route builder benchmark {construction_index}")
                 action["max_path_tiles"] = int(max_path_tiles)
                 before_count = len(observation.get("routes", []) or [])
                 result: dict[str, Any]
+                action_timed_out = False
                 try:
                     admin.send_gamescript({"type": "action", "action": action})
                     result = _next_result(admin, timeout=180.0)
                     observation = _next_observation(admin, timeout=90.0)
                 except Exception as exc:
+                    action_timed_out = True
                     result = {
                         "type": "result",
                         "action_type": "build_cargo_route",
                         "error": "action_timeout_or_error",
                         "detail": str(exc),
                     }
-                    admin.send_gamescript({"type": "observe"})
-                    observation = _next_observation(admin, timeout=90.0)
+                result_error = str(result.get("error") or "")
+                if result_error in ROUTE_BUILDER_INFEASIBLE_REASONS:
+                    skipped_row = {
+                        "probe": probe_index,
+                        "reason": result_error,
+                        "source_id": pair.get("source_id"),
+                        "source_name": pair.get("source_name"),
+                        "destination_id": pair.get("destination_id"),
+                        "destination_name": pair.get("destination_name"),
+                        "cargo_id": pair.get("cargo_id"),
+                        "cargo_label": pair.get("cargo_label"),
+                        "distance": pair.get("distance"),
+                        "production": pair.get("production"),
+                        "result": result,
+                    }
+                    skipped_rows.append(skipped_row)
+                    final_observation = observation
+                    _write_jsonl(skipped_file, skipped_row)
+                    _write_jsonl(observations_file, {"probe": probe_index, "skipped": True, "observation": observation})
+                    continue
                 route = _matching_route(observation, pair)
                 build_success = not result.get("error") and route is not None and not bool(route.get("is_virtual"))
                 wait_result: dict[str, Any] | None = None
+                wait_results: list[dict[str, Any]] = []
                 if build_success and wait_months > 0:
-                    wait_action = {
-                        "type": "wait_months",
-                        "months": int(wait_months),
-                        "label": f"route builder delivery validation {index}",
-                    }
-                    try:
-                        admin.send_gamescript({"type": "action", "action": wait_action})
-                        wait_result = _next_result(admin, timeout=max(120.0, wait_months * 90.0))
-                        observation = _next_observation(admin, timeout=90.0)
-                    except Exception as exc:
-                        wait_result = {
-                            "type": "result",
-                            "action_type": "wait_months",
-                            "error": "action_timeout_or_error",
-                            "detail": str(exc),
+                    remaining_months = int(wait_months)
+                    while remaining_months > 0:
+                        chunk_months = min(2, remaining_months)
+                        wait_action = {
+                            "type": "wait_months",
+                            "months": chunk_months,
+                            "label": f"route builder delivery validation {construction_index}",
                         }
-                        admin.send_gamescript({"type": "observe"})
-                        observation = _next_observation(admin, timeout=120.0)
-                    route = _matching_route(observation, pair)
+                        try:
+                            admin.send_gamescript({"type": "action", "action": wait_action})
+                            wait_result = _next_result(admin, timeout=max(120.0, chunk_months * 90.0))
+                            wait_results.append(wait_result)
+                            observation = _next_observation(admin, timeout=90.0)
+                        except Exception as exc:
+                            wait_result = {
+                                "type": "result",
+                                "action_type": "wait_months",
+                                "error": "action_timeout_or_error",
+                                "detail": str(exc),
+                            }
+                            wait_results.append(wait_result)
+                            admin.send_gamescript({"type": "observe"})
+                            observation = _next_observation(admin, timeout=120.0)
+                            break
+                        route = _matching_route(observation, pair)
+                        if _route_validation_signal(route):
+                            break
+                        if wait_result.get("error"):
+                            break
+                        remaining_months -= chunk_months
                 final_observation = observation
                 delivered = int((route or {}).get("delivered", 0) or 0)
                 profit = float((route or {}).get("profit", (route or {}).get("vehicle_profit", 0)) or 0)
                 active_success = build_success and _route_active(route)
-                operational_success = build_success and (delivered > 0 or profit > 0)
+                operational_success = build_success and _route_validation_signal(route)
                 failure_reason = _route_builder_failure_reason(result, wait_result, route, build_success, operational_success)
                 row = {
-                    "attempt": index,
+                    "attempt": construction_index,
+                    "probe": probe_index,
                     "source_id": pair.get("source_id"),
                     "source_name": pair.get("source_name"),
                     "destination_id": pair.get("destination_id"),
@@ -1614,16 +1658,26 @@ def launch_route_builder_benchmark(
                     "failure_reason": failure_reason,
                     "result": result,
                     "wait_result": wait_result,
+                    "wait_results": wait_results,
                 }
                 attempt_rows.append(row)
                 _write_jsonl(attempts_file, row)
-                _write_jsonl(observations_file, {"attempt": index, "observation": observation})
+                _write_jsonl(observations_file, {"attempt": construction_index, "probe": probe_index, "observation": observation})
+                if action_timed_out:
+                    break
         failed = False
     finally:
         admin.close()
         _terminate_process(server)
 
     aggregate = aggregate_route_builder_attempts(attempt_rows, target_success_rate=target_success_rate)
+    if len(attempt_rows) < attempts:
+        aggregate = {
+            **aggregate,
+            "level1_pass": False,
+            "feasible_level1_pass": False,
+            "insufficient_feasible_attempts": True,
+        }
     payload = {
         "objective": "route_builder_level1",
         "failed": failed,
@@ -1631,6 +1685,8 @@ def launch_route_builder_benchmark(
         "economy": run_config.economy,
         "attempts_requested": attempts,
         "attempts_executed": len(attempt_rows),
+        "pairs_probed": len(attempt_rows) + len(skipped_rows),
+        "skipped_infeasible": len(skipped_rows),
         "vehicles": route_vehicles,
         "wait_months": wait_months,
         "max_path_tiles": max_path_tiles,
@@ -1638,6 +1694,7 @@ def launch_route_builder_benchmark(
         "final_tick": final_observation.get("tick") if final_observation else None,
         "final_routes": final_observation.get("routes", []) if final_observation else [],
         "attempts": str(attempts_path),
+        "skipped_pairs": str(skipped_path),
         "observations": str(observations_path),
         "summary": str(summary_path),
         "run_dir": str(run_dir),
@@ -2037,6 +2094,10 @@ def _candidate_firs_pairs(
         for pair in graph:
             if not _pair_matches_objective(pair, objective):
                 continue
+            if not _road_compatible_industry_name(str(pair.get("source_name", ""))):
+                continue
+            if not _road_compatible_industry_name(str(pair.get("destination_name", ""))):
+                continue
             key = (pair.get("source_id"), pair.get("destination_id"), pair.get("cargo_id"))
             if key in seen:
                 continue
@@ -2055,6 +2116,7 @@ def _candidate_firs_pairs_from_io(
 ) -> list[dict[str, Any]]:
     outputs = observation.get("industry_outputs", [])
     inputs = observation.get("industry_inputs", [])
+    locations = _industry_locations_from_graph(observation)
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[Any, Any, Any]] = set()
     for objective in objectives:
@@ -2066,6 +2128,8 @@ def _candidate_firs_pairs_from_io(
             source_name = str(source.get("industry_name", "")).lower()
             if cargo and cargo_label != cargo:
                 continue
+            if not _road_compatible_industry_name(source_name):
+                continue
             if source_type and source_type not in source_name:
                 continue
             production = source.get("production", 0)
@@ -2075,33 +2139,47 @@ def _candidate_firs_pairs_from_io(
                 destination_name = str(destination.get("industry_name", "")).lower()
                 if str(destination.get("cargo_label", "")).upper() != cargo_label:
                     continue
+                if not _road_compatible_industry_name(destination_name):
+                    continue
                 if destination_type and destination_type not in destination_name:
                     continue
                 key = (source.get("industry_id"), destination.get("industry_id"), source.get("cargo_id"))
                 if key in seen:
                     continue
                 seen.add(key)
-                candidates.append(
-                    {
-                        "source_id": source.get("industry_id"),
-                        "source_name": source.get("industry_name"),
-                        "destination_id": destination.get("industry_id"),
-                        "destination_name": destination.get("industry_name"),
-                        "cargo_id": source.get("cargo_id"),
-                        "cargo_label": cargo_label,
-                        "cargo_name": source.get("cargo_name"),
-                        "production": production,
-                    }
-                )
-                if len(candidates) >= limit:
-                    return candidates
-    return candidates
+                pair = {
+                    "source_id": source.get("industry_id"),
+                    "source_name": source.get("industry_name"),
+                    "destination_id": destination.get("industry_id"),
+                    "destination_name": destination.get("industry_name"),
+                    "cargo_id": source.get("cargo_id"),
+                    "cargo_label": cargo_label,
+                    "cargo_name": source.get("cargo_name"),
+                    "production": production,
+                }
+                candidates.append(_enrich_pair_geometry(pair, locations))
+    candidates.sort(
+        key=lambda pair: (
+            int(pair.get("distance", 999999) or 999999),
+            -float(CARGO_VALUE.get(str(pair.get("cargo_label", "")).upper(), 1.0)),
+            -float(pair.get("production", 0) or 0),
+            str(pair.get("source_name", "")),
+            str(pair.get("destination_name", "")),
+        )
+    )
+    return candidates[:limit]
 
 
 def _candidate_open_play_pairs(observation: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
     graph = list(observation.get("industry_graph", []) or [])
     routes = observation.get("routes", []) or []
-    graph = [pair for pair in graph if not _route_already_registered(pair, routes)]
+    graph = [
+        pair
+        for pair in graph
+        if not _route_already_registered(pair, routes)
+        and _road_compatible_industry_name(str(pair.get("source_name", "")))
+        and _road_compatible_industry_name(str(pair.get("destination_name", "")))
+    ]
     graph.sort(
         key=lambda pair: (
             int(pair.get("distance", 999999) or 999999),
@@ -2110,6 +2188,100 @@ def _candidate_open_play_pairs(observation: dict[str, Any], *, limit: int) -> li
         )
     )
     return graph[:limit]
+
+
+def _candidate_open_play_pairs_from_io(observation: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    outputs = observation.get("industry_outputs", []) or []
+    inputs = observation.get("industry_inputs", []) or []
+    routes = observation.get("routes", []) or []
+    locations = _industry_locations_from_graph(observation)
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for source in outputs:
+        source_id = source.get("industry_id")
+        source_name = str(source.get("industry_name", ""))
+        cargo_id = source.get("cargo_id")
+        cargo_label = str(source.get("cargo_label", "")).upper()
+        production = source.get("production", 0)
+        if not isinstance(source_id, int) or not isinstance(cargo_id, int):
+            continue
+        if not cargo_label or not _road_compatible_industry_name(source_name):
+            continue
+        if isinstance(production, (int, float)) and production <= 0:
+            continue
+        for destination in inputs:
+            destination_id = destination.get("industry_id")
+            destination_name = str(destination.get("industry_name", ""))
+            if not isinstance(destination_id, int) or destination_id == source_id:
+                continue
+            if str(destination.get("cargo_label", "")).upper() != cargo_label:
+                continue
+            if not _road_compatible_industry_name(destination_name):
+                continue
+            pair = {
+                "source_id": source_id,
+                "source_name": source_name,
+                "destination_id": destination_id,
+                "destination_name": destination_name,
+                "cargo_id": cargo_id,
+                "cargo_label": cargo_label,
+                "cargo_name": source.get("cargo_name", cargo_label),
+                "production": production,
+            }
+            if _route_already_registered(pair, routes):
+                continue
+            key = _route_key(pair)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(_enrich_pair_geometry(pair, locations))
+    candidates.sort(
+        key=lambda pair: (
+            int(pair.get("distance", 999999) or 999999),
+            -float(CARGO_VALUE.get(str(pair.get("cargo_label", "")).upper(), 1.0)),
+            -float(pair.get("production", 0) or 0),
+            str(pair.get("source_name", "")),
+            str(pair.get("destination_name", "")),
+        )
+    )
+    return candidates[:limit]
+
+
+def _industry_locations_from_graph(observation: dict[str, Any]) -> dict[int, tuple[int, int]]:
+    locations: dict[int, tuple[int, int]] = {}
+    for pair in observation.get("industry_graph", []) or []:
+        source_id = pair.get("source_id")
+        destination_id = pair.get("destination_id")
+        if isinstance(source_id, int) and isinstance(pair.get("source_x"), int) and isinstance(pair.get("source_y"), int):
+            locations[source_id] = (int(pair["source_x"]), int(pair["source_y"]))
+        if (
+            isinstance(destination_id, int)
+            and isinstance(pair.get("destination_x"), int)
+            and isinstance(pair.get("destination_y"), int)
+        ):
+            locations[destination_id] = (int(pair["destination_x"]), int(pair["destination_y"]))
+    return locations
+
+
+def _enrich_pair_geometry(pair: dict[str, Any], locations: dict[int, tuple[int, int]]) -> dict[str, Any]:
+    enriched = dict(pair)
+    source_id = enriched.get("source_id")
+    destination_id = enriched.get("destination_id")
+    source_xy = locations.get(source_id) if isinstance(source_id, int) else None
+    destination_xy = locations.get(destination_id) if isinstance(destination_id, int) else None
+    if source_xy is not None:
+        enriched["source_x"], enriched["source_y"] = source_xy
+    if destination_xy is not None:
+        enriched["destination_x"], enriched["destination_y"] = destination_xy
+    if source_xy is not None and destination_xy is not None:
+        enriched["distance"] = abs(source_xy[0] - destination_xy[0]) + abs(source_xy[1] - destination_xy[1])
+    return enriched
+
+
+def _road_compatible_industry_name(name: str) -> bool:
+    lowered = name.lower()
+    blocked = (" port", "port", "fishing grounds", "fishing harbour", "dredging site")
+    return not any(token in lowered for token in blocked)
 
 
 def _route_builder_candidate_pairs(
@@ -2124,6 +2296,7 @@ def _route_builder_candidate_pairs(
         _candidate_firs_pairs(observation.get("industry_graph", []), workbook_meta.get("objectives", []), limit=limit),
         _candidate_firs_pairs_from_io(observation, workbook_meta.get("objectives", []), limit=limit),
         _candidate_open_play_pairs(observation, limit=limit * 2),
+        _candidate_open_play_pairs_from_io(observation, limit=limit * 2),
     ]
     for source in sources:
         for pair in source:
@@ -2174,6 +2347,21 @@ def _route_active(route: dict[str, Any] | None) -> bool:
             continue
         if not bool(vehicle.get("in_depot", False)):
             return True
+        if int(vehicle.get("load", 0) or 0) > 0:
+            return True
+    return False
+
+
+def _route_validation_signal(route: dict[str, Any] | None) -> bool:
+    if route is None:
+        return False
+    if int(route.get("delivered", 0) or 0) > 0:
+        return True
+    if float(route.get("profit", route.get("vehicle_profit", 0)) or 0) > 0:
+        return True
+    if int(route.get("source_waiting", 0) or 0) > 0:
+        return True
+    for vehicle in route.get("vehicle_details", []) or []:
         if int(vehicle.get("load", 0) or 0) > 0:
             return True
     return False
@@ -2349,11 +2537,13 @@ def _write_jsonl(handle: Any, data: dict[str, Any]) -> None:
     handle.flush()
 
 
-def _next_observation(admin: AdminClient, timeout: float) -> dict[str, Any]:
+def _next_observation(admin: AdminClient, timeout: float, reasons: tuple[str, ...] | None = None) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         message = admin.read_gamescript(timeout=deadline - time.time())
         if message.get("type") == "observation":
+            if reasons is not None and message.get("reason") not in reasons:
+                continue
             return message
     raise EnvError("Timed out waiting for observation.")
 
@@ -2448,9 +2638,16 @@ none = start_date=1
 
 def _new_run_dir(output_root: Path, *, suffix: str = "live_gpt") -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = output_root.resolve() / f"{timestamp}_{suffix}"
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
+    root = output_root.resolve()
+    for counter in range(1000):
+        name = f"{timestamp}_{suffix}" if counter == 0 else f"{timestamp}_{suffix}_{counter:03d}"
+        run_dir = root / name
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            continue
+    raise EnvError(f"Could not allocate a unique run directory under {root}")
 
 
 def _with_client_name(config_text: str, client_name: str) -> str:
@@ -2539,6 +2736,46 @@ def _start_recording(path: Path, *, source: str | None = None) -> subprocess.Pop
     return _popen_hidden(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE)
 
 
+def _close_recording_overlays(source: str | None = None) -> bool:
+    """Close transient OpenTTD UI windows before screen capture starts."""
+    if os.name != "nt":
+        return False
+    title = _recording_window_title(source)
+    if not title:
+        return False
+    hwnd = _wait_for_window_handle(title, timeout=15.0)
+    if hwnd is None:
+        return False
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    try:
+        user32.SetForegroundWindow(hwnd)
+    except OSError:
+        pass
+    vk_escape = 0x1B
+    wm_keydown = 0x0100
+    wm_keyup = 0x0101
+    for _ in range(3):
+        user32.PostMessageW(hwnd, wm_keydown, vk_escape, 0)
+        user32.PostMessageW(hwnd, wm_keyup, vk_escape, 0)
+        time.sleep(0.12)
+    return True
+
+
+def _recording_window_title(source: str | None = None) -> str | None:
+    capture_source = source or os.environ.get("OPENTTD_RECORD_SOURCE")
+    if capture_source is None:
+        capture_source = "window-region=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")
+    if os.name != "nt":
+        return None
+    if capture_source.startswith("window-region="):
+        return capture_source.removeprefix("window-region=")
+    if capture_source.startswith("title="):
+        return capture_source.removeprefix("title=")
+    return None
+
+
 def _wait_for_window_client_rect(title: str, timeout: float = 15.0) -> tuple[int, int, int, int] | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -2587,6 +2824,43 @@ def _find_window_client_rect(title: str) -> tuple[int, int, int, int] | None:
             return True
         matches.append((int(origin.x), int(origin.y), width, height))
         return False
+
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_callback)
+    user32.EnumWindows(callback, 0)
+    return matches[0] if matches else None
+
+
+def _wait_for_window_handle(title: str, timeout: float = 15.0) -> int | None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        hwnd = _find_window_handle(title)
+        if hwnd is not None:
+            return hwnd
+        time.sleep(0.25)
+    return None
+
+
+def _find_window_handle(title: str) -> int | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    matches: list[int] = []
+
+    def enum_callback(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if title in buffer.value:
+            matches.append(int(hwnd))
+            return False
+        return True
 
     callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(enum_callback)
     user32.EnumWindows(callback, 0)
@@ -2700,6 +2974,31 @@ def _find_free_port(start: int) -> int:
             except OSError:
                 continue
             return port
+    raise EnvError(f"No free TCP port found from {start}.")
+
+
+def _find_distinct_free_ports(game_start: int = 3979, admin_start: int = 3977) -> tuple[int, int]:
+    sockets: list[socket.socket] = []
+    try:
+        game_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        game_port = _bind_free_port(game_socket, game_start)
+        sockets.append(game_socket)
+        admin_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        admin_port = _bind_free_port(admin_socket, admin_start)
+        sockets.append(admin_socket)
+        return game_port, admin_port
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+def _bind_free_port(sock: socket.socket, start: int) -> int:
+    for port in range(start, start + 200):
+        try:
+            sock.bind(("0.0.0.0", port))
+            return int(sock.getsockname()[1])
+        except OSError:
+            continue
     raise EnvError(f"No free TCP port found from {start}.")
 
 

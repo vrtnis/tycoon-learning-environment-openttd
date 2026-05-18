@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from openttd_le.agents.base import Agent
+from openttd_le.agents.firs import HeuristicFIRSAgent, OpenAIFIRSMacroAgent, make_firs_agent
 from openttd_le.agents.frontier import CandidateRankAgent, PreviewRerankAgent
 from openttd_le.agents.greedy import GreedyAgent
 from openttd_le.agents.llm import OpenAIAgent, OpenRouterAgent
@@ -27,9 +28,12 @@ __all__ = [
     "Agent",
     "CandidateRankAgent",
     "GreedyAgent",
+    "HeuristicFIRSAgent",
+    "OpenAIFIRSMacroAgent",
     "OpenAIAgent",
     "OpenRouterAgent",
     "PreviewRerankAgent",
     "RandomAgent",
+    "make_firs_agent",
     "make_agent",
 ]

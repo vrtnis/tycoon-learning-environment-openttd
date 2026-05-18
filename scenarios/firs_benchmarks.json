@@ -1,9 +1,14 @@
 {
+  "schema": "openttd-le-firs-benchmark-suite-v2",
+  "description": "Real OpenTTD/FIRS benchmark tasks. These are macro-action RL tasks over a physical OpenTTD simulation, not toy-mode tasks.",
   "tasks": [
     {
       "id": "lab_supply_mine_short",
+      "split": "experimental",
+      "difficulty": "medium",
       "mode": "lab",
-      "description": "Build a short operational supply route into a primary industry.",
+      "tags": ["supply", "single_route", "water_source", "experimental"],
+      "description": "Experimental supply route into a primary industry; this may require non-road source handling depending on the generated map.",
       "seed": 1,
       "economy": "basic_temperate",
       "steps": 8,
@@ -27,7 +32,10 @@
     },
     {
       "id": "lab_raw_to_processor",
+      "split": "dev",
+      "difficulty": "easy",
       "mode": "lab",
+      "tags": ["raw_material", "single_route", "physical_route"],
       "description": "Connect a raw material producer to its first processor.",
       "seed": 1,
       "economy": "basic_temperate",
@@ -51,8 +59,133 @@
       ]
     },
     {
+      "id": "lab_raw_to_processor_short",
+      "split": "train",
+      "difficulty": "easy",
+      "mode": "lab",
+      "tags": ["raw_material", "single_route", "short_horizon"],
+      "description": "Short-horizon coal-to-processor construction and first-delivery task.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 8,
+      "prompt": "Build one coal route quickly and wait for enough time to confirm delivery.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "required_cargo": "COAL"
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Coal Mine",
+          "destination_type": "Steel Mill",
+          "cargo": "COAL",
+          "deadline_year": 2,
+          "required_delivered": 1,
+          "weight": 100
+        }
+      ]
+    },
+    {
+      "id": "lab_raw_to_processor_profit",
+      "split": "dev",
+      "difficulty": "medium",
+      "mode": "lab",
+      "tags": ["raw_material", "profit", "single_route"],
+      "description": "Build a raw-material route and keep the network profitable.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 20,
+      "prompt": "Build a coal route, avoid low-quality duplicate construction, and wait until it is profitable.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "required_cargo": "COAL",
+        "min_network_value": 20
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Coal Mine",
+          "destination_type": "Steel Mill",
+          "cargo": "COAL",
+          "deadline_year": 3,
+          "required_delivered": 2,
+          "weight": 100
+        }
+      ]
+    },
+    {
+      "id": "lab_two_route_chain",
+      "split": "dev",
+      "difficulty": "medium",
+      "mode": "lab",
+      "tags": ["multi_stage", "processor_output", "planning"],
+      "description": "Build a two-route chain from raw material to processor output.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 32,
+      "prompt": "Build coal to the steel mill first. After first delivery, build a downstream steel route if available.",
+      "success": {
+        "min_routes": 2,
+        "min_delivered_routes": 1,
+        "min_network_value": 35
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Coal Mine",
+          "destination_type": "Steel Mill",
+          "cargo": "COAL",
+          "deadline_year": 2,
+          "required_delivered": 1,
+          "weight": 70
+        },
+        {
+          "step": 2,
+          "source_type": "Steel Mill",
+          "destination_type": "Metal Works",
+          "cargo": "STEL",
+          "deadline_year": 3,
+          "required_delivered": 1,
+          "weight": 130
+        }
+      ]
+    },
+    {
+      "id": "lab_wait_capacity_control",
+      "split": "train",
+      "difficulty": "medium",
+      "mode": "lab",
+      "tags": ["capacity", "wait", "control"],
+      "description": "Learn when to wait versus add vehicles after an initial route exists.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 24,
+      "prompt": "Build one operational route, observe waiting cargo and station ratings, then add capacity only when useful.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "min_network_value": 25
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Coal Mine",
+          "destination_type": "Steel Mill",
+          "cargo": "COAL",
+          "deadline_year": 3,
+          "required_delivered": 2,
+          "weight": 100
+        }
+      ]
+    },
+    {
       "id": "open_play_network_value",
+      "split": "dev",
+      "difficulty": "medium",
       "mode": "open",
+      "tags": ["open_play", "network_value", "planning"],
       "description": "Maximize delivered cargo value, network profit, and milestones over the step budget.",
       "seed": 1,
       "economy": "basic_temperate",
@@ -60,6 +193,106 @@
       "prompt": "Build the highest-value logistics network possible. Prefer short operational routes first, then expand to higher-value cargo chains.",
       "success": {
         "min_network_value": 25
+      },
+      "objectives": []
+    },
+    {
+      "id": "open_play_short_horizon",
+      "split": "train",
+      "difficulty": "easy",
+      "mode": "open",
+      "tags": ["open_play", "short_horizon", "single_route"],
+      "description": "Open-play route construction under a short horizon.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 12,
+      "prompt": "Build one high-confidence operational route and avoid wasting actions.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "min_network_value": 10
+      },
+      "objectives": []
+    },
+    {
+      "id": "open_play_profit",
+      "split": "test",
+      "difficulty": "medium",
+      "mode": "open",
+      "tags": ["open_play", "profit", "generalization"],
+      "description": "Open-play task scored on profitable delivered cargo rather than a named chain.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 32,
+      "prompt": "Choose feasible routes with short travel distance and enough production, then wait for profitable delivery.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "min_network_value": 30
+      },
+      "objectives": []
+    },
+    {
+      "id": "open_play_route_count",
+      "split": "test",
+      "difficulty": "hard",
+      "mode": "open",
+      "tags": ["open_play", "expansion", "multi_route"],
+      "description": "Expand beyond one route while preserving operational quality.",
+      "seed": 1,
+      "economy": "basic_temperate",
+      "steps": 48,
+      "prompt": "Build multiple feasible operational routes. Prefer quality and delivery over raw construction count.",
+      "success": {
+        "min_routes": 2,
+        "min_delivered_routes": 1,
+        "min_network_value": 35
+      },
+      "objectives": []
+    },
+    {
+      "id": "generalization_seed_heldout",
+      "split": "test",
+      "difficulty": "medium",
+      "mode": "lab",
+      "tags": ["heldout_seed", "raw_material", "generalization"],
+      "description": "Held-out-seed raw-material task for checking whether policies overfit a single map.",
+      "seed": 7,
+      "economy": "basic_temperate",
+      "steps": 20,
+      "prompt": "On a held-out seed, find a feasible raw-material route and get first delivery.",
+      "success": {
+        "min_routes": 1,
+        "min_delivered_routes": 1,
+        "required_cargo": "COAL"
+      },
+      "objectives": [
+        {
+          "step": 1,
+          "source_type": "Coal Mine",
+          "destination_type": "Steel Mill",
+          "cargo": "COAL",
+          "deadline_year": 3,
+          "required_delivered": 1,
+          "weight": 100
+        }
+      ]
+    },
+    {
+      "id": "stress_longer_horizon_network",
+      "split": "test",
+      "difficulty": "hard",
+      "mode": "open",
+      "tags": ["open_play", "long_horizon", "stress"],
+      "description": "Longer-horizon open-play stress task for route quality, waiting, and expansion decisions.",
+      "seed": 11,
+      "economy": "basic_temperate",
+      "steps": 96,
+      "prompt": "Develop the strongest profitable road logistics network over the full horizon.",
+      "success": {
+        "min_routes": 2,
+        "min_delivered_routes": 2,
+        "min_network_value": 60
       },
       "objectives": []
     }

@@ -105,8 +105,38 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(aggregate["build_success_rate"], 0.667)
         self.assertEqual(aggregate["active_success_rate"], 0.667)
         self.assertEqual(aggregate["operational_success_rate"], 0.333)
+        self.assertEqual(aggregate["feasible_attempts"], 3)
+        self.assertEqual(aggregate["feasible_operational_success_rate"], 0.333)
         self.assertFalse(aggregate["level1_pass"])
         self.assertEqual(aggregate["failure_counts"]["road_connection_failed"], 1)
+
+    def test_aggregate_route_builder_tracks_feasible_subset(self) -> None:
+        aggregate = aggregate_route_builder_attempts(
+            [
+                {"build_success": True, "active_success": True, "operational_success": True},
+                {
+                    "build_success": False,
+                    "active_success": False,
+                    "operational_success": False,
+                    "failure_reason": "no_path_between_station_candidates",
+                },
+                {
+                    "build_success": True,
+                    "active_success": True,
+                    "operational_success": False,
+                    "failure_reason": "no_delivery_after_wait",
+                },
+            ],
+            target_success_rate=0.5,
+        )
+
+        self.assertEqual(aggregate["attempts"], 3)
+        self.assertEqual(aggregate["feasible_attempts"], 2)
+        self.assertEqual(aggregate["infeasible_attempts"], 1)
+        self.assertEqual(aggregate["feasible_operational_success_rate"], 0.5)
+        self.assertTrue(aggregate["feasible_level1_pass"])
+        self.assertFalse(aggregate["level1_pass"])
+        self.assertEqual(aggregate["infeasible_failure_counts"]["no_path_between_station_candidates"], 1)
 
 
 if __name__ == "__main__":

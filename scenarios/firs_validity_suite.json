@@ -1,0 +1,43 @@
+{
+  "schema": "openttd-le-firs-validity-suite-v1",
+  "name": "openttd-le-firs-validity-v0",
+  "description": "Real OpenTTD/FIRS validity suite for deterministic API checks, route-construction reliability, throughput, and non-GPT Gym baselines.",
+  "benchmark_file": "scenarios/firs_benchmarks.json",
+  "tasks": [
+    "lab_raw_to_processor",
+    "lab_raw_to_processor_short",
+    "lab_raw_to_processor_profit",
+    "lab_two_route_chain",
+    "lab_wait_capacity_control",
+    "open_play_short_horizon",
+    "open_play_network_value",
+    "open_play_profit",
+    "open_play_route_count",
+    "generalization_seed_heldout",
+    "stress_longer_horizon_network"
+  ],
+  "default_agents": [
+    "masked_random",
+    "first_valid",
+    "highest_production",
+    "shortest_route"
+  ],
+  "default_seeds": [
+    1,
+    2
+  ],
+  "gates": {
+    "determinism_repeats": 3,
+    "determinism_max_steps": 3,
+    "baseline_max_steps": 8,
+    "throughput_steps": 3,
+    "route_builder_attempts": 20,
+    "route_builder_wait_months": 6,
+    "route_builder_target_success_rate": 0.9
+  },
+  "notes": [
+    "Toy/mock tasks are not part of this suite.",
+    "Route-builder reliability is measured once per seed/economy because it tests the physical construction primitive rather than a policy.",
+    "For a short development pass, override --tasks/--seeds and use --skip-route-builder. For release claims, run the full suite."
+  ]
+}

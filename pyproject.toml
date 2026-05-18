@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openttd-le"
-version = "0.4.0"
+version = "0.4.4"
 description = "OpenTTD Learning Environment scaffold for logistics-planning agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,9 +16,13 @@ dependencies = []
 dev = ["pytest>=8.0"]
 gymnasium = ["gymnasium>=1.0"]
 parquet = ["pandas>=2.0", "pyarrow>=15.0"]
+rl = ["gymnasium>=1.0", "stable-baselines3>=2.3", "sb3-contrib>=2.3"]
 
 [project.scripts]
 openttd-le = "openttd_le.cli:main"
+
+[project.entry-points."gymnasium.envs"]
+openttd_le = "openttd_le.adapters.gymnasium:register_envs"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -112,8 +112,27 @@ def _install_script_dir(name: str, kind: str, source_dir: Path | None = None) ->
     target.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
         if item.is_file():
-            shutil.copy2(item, target / item.name)
+            destination = target / item.name
+            if _same_file_bytes(item, destination):
+                continue
+            try:
+                shutil.copy2(item, destination)
+            except PermissionError:
+                if destination.exists():
+                    continue
+                raise
     return target
+
+
+def _same_file_bytes(source: Path, destination: Path) -> bool:
+    if not destination.exists() or not destination.is_file():
+        return False
+    try:
+        if source.stat().st_size != destination.stat().st_size:
+            return False
+        return source.read_bytes() == destination.read_bytes()
+    except OSError:
+        return True
 
 
 def ensure_opengfx() -> Path:

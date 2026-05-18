@@ -1,20 +1,282 @@
 # OpenTTD-LE
 
-OpenTTD-LE is a benchmark scaffold for evaluating LLM and planning agents on
-transport-logistics tasks inspired by OpenTTD. The current milestone establishes
-the benchmark contracts: scenarios, structured observations, validated
-macro-actions, agents, scoring, and reproducible artifacts.
+OpenTTD-LE is a real OpenTTD/FIRS environment layer for evaluating LLM and
+planning agents on transport-logistics tasks. The primary path launches
+OpenTTD, drives the bundled GameScript/Admin Port bridge, executes physical
+macro-actions in the game, and writes researcher artifacts: actions,
+observations, rewards, reports, replay manifests, and optional gameplay video.
 
-The first backend is a deterministic logistics simulator used to exercise the
-environment loop. The real OpenTTD backend is intentionally isolated behind the
-same interface and is the next integration step.
+The core environment follows the Farama/Gymnasium separation: the environment
+owns `reset -> step -> reward -> done`, while GPT-5.5 is only one replaceable
+baseline agent.
 
-## v0.3 Researcher MVP
+Toy mode exists only as a local mock backend for unit tests, CI, and fast API
+debugging. It is not the research environment.
 
-OpenTTD-LE now exposes the first research-instrument layer for local agent
-work. Observations include a `candidate_actions` frontier with executable
-actions, feasibility flags, route economics, objective relevance, and ranking
-metadata. The environment also exposes:
+## OpenTTD Research Quickstart
+
+Install OpenTTD, install FIRS through OpenTTD's Online Content UI, then run:
+
+```bash
+python -m pip install -e .
+openttd-le firs-init-workbook --config configs/firs_basic.toml --out scenario.xlsx
+set "OPENTTD_USER_DIR=%CD%\.openttd"
+openttd-le smoke-openttd --firs --openttd-user-dir .openttd
+openttd-le list-openttd-scenarios
+$env:OPENAI_API_KEY="..."
+openttd-le eval --scenario lab_raw_to_processor --model gpt-5.5 --workbook scenario.xlsx --openttd-user-dir .openttd --out runs_openttd
+```
+
+For bridge testing without an API key:
+
+```bash
+openttd-le eval --scenario lab_raw_to_processor --agent heuristic --workbook scenario.xlsx --openttd-user-dir .openttd --out runs_openttd
+```
+
+Use the native environment directly:
+
+```python
+from openttd_le.envs import OpenTTDFIRSEnv
+
+env = OpenTTDFIRSEnv(
+    workbook="scenario.xlsx",
+    task_id="lab_raw_to_processor",
+    openttd_user_dir=".openttd",
+    seed=1,
+)
+obs, info = env.reset()
+action = info["candidate_actions"][0]["action"]
+obs, reward, terminated, truncated, info = env.step(action)
+env.close()
+```
+
+The real environment accepts macro-actions:
+
+```python
+{"type": "build_cargo_route", "source_id": 29, "destination_id": 12, "cargo_id": 2, "vehicles": 5}
+{"type": "wait_months", "months": 1}
+{"type": "add_vehicles", "route_id": "route_1", "count": 1}
+{"type": "inspect_bottlenecks"}
+```
+
+`candidate_actions` are suggestions exposed in `obs` and `info`; the environment
+does not choose them for the agent. The OpenAI/GPT path is a baseline agent
+that consumes the same observations and returns one macro-action at a time.
+
+Use the optional Gymnasium adapter when an RL loop needs fixed spaces:
+
+```python
+from openttd_le.adapters.gymnasium import OpenTTDFIRSGymEnv
+
+env = OpenTTDFIRSGymEnv(
+    workbook="scenario.xlsx",
+    task_id="lab_raw_to_processor",
+    openttd_user_dir=".openttd",
+    max_candidates=24,
+)
+obs, info = env.reset(seed=1)
+action_mask = info["action_mask"]
+obs, reward, terminated, truncated, info = env.step(0)
+env.close()
+```
+
+The adapter exposes `Discrete(max_candidates)` over the current macro-action
+frontier. Rich OpenTTD state remains available as `info["native_observation"]`;
+`info["candidate_actions"]` and `info["action_mask"]` are the standard control
+surface for masked-action RL algorithms.
+
+The registered Gymnasium IDs are:
+
+- `OpenTTD-FIRS-Lab-v0`: real OpenTTD/FIRS, launches OpenTTD on `reset()`.
+- `OpenTTD-FIRS-Deterministic-v0`: real OpenTTD/FIRS with deterministic API observations and normalized info.
+- `OpenTTDLE-Toy-v0`: mock backend for CI and interface debugging.
+
+```python
+import gymnasium as gym
+import openttd_le.adapters.gymnasium
+
+env = gym.make(
+    "OpenTTD-FIRS-Lab-v0",
+    workbook="scenario.xlsx",
+    openttd_user_dir=".openttd",
+    max_candidates=24,
+)
+```
+
+Validate the adapter contract:
+
+```bash
+openttd-le check-gym-env --backend toy
+openttd-le check-gym-env --backend openttd --scenario lab_raw_to_processor --workbook scenario.xlsx --openttd-user-dir .openttd
+openttd-le check-gym-env --backend openttd --deterministic --scenario lab_raw_to_processor --workbook scenario.xlsx --openttd-user-dir .openttd
+```
+
+The real FIRS Gym observation is a fixed-shape `spaces.Dict`:
+
+| Key | Shape | Meaning |
+| --- | --- | --- |
+| `tick` | scalar `float32` | OpenTTD game tick |
+| `bank_balance` | scalar `float32` | company cash balance |
+| `route_count` | scalar `float32` | registered physical cargo routes |
+| `delivered_routes` | scalar `float32` | routes with at least one delivery |
+| `cargo_delivered` | scalar `float32` | total cargo units delivered |
+| `route_profit` | scalar `float32` | summed route vehicle profit |
+| `candidate_production` | `float32[max_candidates]` | production estimate for each candidate route action |
+| `action_mask` | `int8[max_candidates]` | valid candidate indexes for masked-action algorithms |
+
+The wrapper also implements `env.action_masks()` for libraries such as
+MaskablePPO. Full structured state stays in `info["native_observation"]`, not
+the policy tensor.
+
+Parallel rollout helpers are available for small worker counts:
+
+```python
+from openttd_le.adapters.gymnasium import make_firs_vector
+
+envs = make_firs_vector(
+    2,
+    workbook="scenario.xlsx",
+    task_id="lab_raw_to_processor",
+    openttd_user_dir=".openttd",
+)
+```
+
+Each worker launches its own OpenTTD process and gets unique ephemeral network
+ports. This is suitable for low-parallelism research experiments; large-scale
+parallel RL needs enough CPU/RAM for multiple OpenTTD instances.
+
+Non-GPT Gym baselines:
+
+```bash
+openttd-le benchmark-gym --workbook scenario.xlsx --scenario lab_raw_to_processor --openttd-user-dir .openttd --agents masked_random,first_valid,highest_production,shortest_route --seeds 1,2,3
+python examples/random_gym_rollout.py --workbook scenario.xlsx --openttd-user-dir .openttd
+python examples/train_maskable_ppo.py --workbook scenario.xlsx --openttd-user-dir .openttd --timesteps 64
+python examples/train_dqn_macro.py --workbook scenario.xlsx --openttd-user-dir .openttd --timesteps 128
+```
+
+Researcher training/eval harness:
+
+```bash
+openttd-le train-rl-baselines --workbook scenario.xlsx --scenario lab_raw_to_processor --openttd-user-dir .openttd --algorithms scripted:masked_random,scripted:first_valid --seeds 1,2 --out runs_rl
+openttd-le train-rl-baselines --workbook scenario.xlsx --scenario lab_raw_to_processor --openttd-user-dir .openttd --algorithms dqn --total-timesteps 128 --eval-interval 64 --out runs_rl_dqn
+```
+
+Install `openttd-le[rl]` or `stable-baselines3 sb3-contrib` before running
+`dqn` or `maskable_ppo`. The scripted algorithms are dependency-free controls.
+The harness writes `rl_training_report.json`, `benchmark_report.md`, CSV tables,
+and SVG learning curves.
+
+Determinism check:
+
+```bash
+openttd-le determinism-check --workbook scenario.xlsx --scenario lab_raw_to_processor --openttd-user-dir .openttd --agent first_valid --seed 1 --repeats 3 --max-steps 3
+```
+
+This command reruns the same baseline action sequence against real OpenTTD/FIRS
+and compares normalized observations, rewards, termination flags, and Gym info.
+It writes `determinism_report.json` and exits non-zero on the first mismatch.
+The deterministic Gym mode removes volatile runtime fields such as ports, PIDs,
+run directories, raw game ticks, viewport scrolls, and vehicle pixel positions
+from the API comparison surface. The raw simulator artifacts remain in each run
+directory for audit and replay.
+
+Benchmark validity pack:
+
+```bash
+openttd-le benchmark-validity-pack --workbook scenario.xlsx --openttd-user-dir .openttd --out runs_validity
+```
+
+The validity pack is the pre-release research gate. It loads
+`scenarios/firs_validity_suite.json`, writes `suite_manifest.json`, then runs:
+
+- deterministic repeated traces for each task/seed
+- non-GPT Gym baselines over the official task suite
+- throughput measurements: reset time, step time, transitions/hour
+- physical route-builder reliability for each seed/economy pair
+
+For a quick smoke run during development:
+
+```bash
+openttd-le benchmark-validity-pack --workbook scenario.xlsx --openttd-user-dir .openttd --tasks lab_raw_to_processor --agents first_valid --seeds 1 --determinism-repeats 2 --determinism-max-steps 2 --baseline-max-steps 2 --throughput-steps 2 --skip-route-builder --out runs_validity_smoke
+```
+
+The full report is written to `validity_report.json`. This is the artifact to
+inspect before claiming the environment is suitable for serious RL experiments.
+It also writes `benchmark_report.md`, CSV tables under `tables/`, and SVG curves
+under `curves/` when training data is supplied.
+
+To merge validity and training reports into one artifact:
+
+```bash
+openttd-le build-benchmark-report --validity-report runs_validity/validity_report.json --training-report runs_rl/rl_training_report.json --route-builder-report runs_route_builder/<run>/summary.json --out runs_research_report
+```
+
+For reproducibility, each real run records `seed`, `economy`, FIRS NewGRF path
+and parsed version, OpenTTD executable path, OpenTTD-LE version, generated
+`openttd.cfg`, runtime SHA-256 fingerprints, and the ephemeral `game_port` /
+`admin_port` in `summary.json` and `launch.json`. Ports are intentionally not
+fixed; they are runtime isolation metadata, not part of the deterministic
+scenario definition. `runtime.cfg_effective_sha256` normalizes those ephemeral
+ports before hashing the config.
+
+Research runs write:
+
+- `observations.jsonl`
+- `actions.jsonl`
+- `rewards.jsonl`
+- `firs_trace.jsonl`
+- `summary.json`
+- `report.xlsx`
+- `openttd.cfg`
+- `replay.json`
+
+`build_cargo_route()` attempts real OpenTTD stations, roads, depots, vehicles,
+and orders with `allow_virtual=False`, returning typed failures when the bridge
+cannot build a continuous operational route.
+
+## Real Gameplay Video
+
+For visible OpenTTD video, use the live/replay path:
+
+```bash
+openttd-le play-firs-live --workbook scenario.xlsx --model gpt-5.5 --record --out runs_firs
+openttd-le export-replay --run runs_firs/<timestamp>_firs_ops
+openttd-le play-replay --replay runs_firs/<timestamp>_firs_ops/replay.json --workbook scenario.xlsx --out runs_replay
+```
+
+Research `eval` runs already write `replay.json`, so they can be rendered later
+without rerunning the model:
+
+```bash
+openttd-le play-replay --replay runs_openttd/<timestamp>_firs_research/replay.json --workbook scenario.xlsx --out runs_replay
+```
+
+Artifacts include `gameplay.mp4` and `gameplay_8x.mp4` when `ffmpeg` is
+available and the OpenTTD client window can be captured.
+
+## OpenTTD Benchmarks
+
+Batch model/task comparisons use:
+
+```bash
+openttd-le firs-benchmark --workbook scenario.xlsx --tasks lab_supply_mine_short,lab_raw_to_processor --models gpt-5.5 --repeats 3 --openttd-user-dir .openttd
+```
+
+Benchmark task definitions live in `scenarios/firs_benchmarks.json`.
+
+Physical construction reliability is measured separately:
+
+```bash
+openttd-le benchmark-route-builder --workbook scenario.xlsx --attempts 20 --openttd-user-dir .openttd
+```
+
+## Mock Backend
+
+The mock backend is a deterministic Python logistics simulator. It is useful for
+unit tests and interface experiments, not for serious OpenTTD research. Its
+observations include a `candidate_actions` frontier with executable actions,
+feasibility flags, route economics, objective relevance, and ranking metadata.
+The environment also exposes:
 
 ```python
 env.candidate_actions()
@@ -23,9 +285,7 @@ result = env.step(action)
 result.info["reward_details"]
 ```
 
-This makes the local SDK useful for one-shot agents, best-of-N rerankers,
-search, value-model training, replay analysis, and offline relabeling. Every
-`eval` run writes research traces in addition to the original artifacts:
+Every mock `eval --backend toy` run writes traces:
 
 - `episode.jsonl` with before/after observations, candidates, chosen action,
   preview, reward details, and step info
@@ -43,13 +303,13 @@ openttd-le export-dataset --run runs --out dataset.jsonl
 openttd-le export-dataset --run runs --out dataset.parquet --format parquet
 ```
 
-Run the canonical local benchmark suite:
+Run the mock benchmark suite:
 
 ```bash
 openttd-le benchmark-core --suite core --agents random,greedy,candidate_rank,preview_rerank --seeds 1,2,3 --out runs_core
 ```
 
-Use the optional Gymnasium adapter:
+Use the optional Gymnasium adapter for the mock backend:
 
 ```python
 from openttd_le.adapters.gymnasium import OpenTTDLEGymEnv
@@ -59,7 +319,7 @@ obs, info = env.reset(seed=1)
 obs, reward, terminated, truncated, info = env.step(0)
 ```
 
-## v0.4 Procedural Benchmarking
+### Mock Procedural Benchmarking
 
 The fixed lab-play suite is useful for debugging but can saturate quickly.
 `v0.4` adds deterministic procedural scenario families with explicit
@@ -86,10 +346,10 @@ openttd-le benchmark-core --suite procedural --split test --agents my_agent --se
 Generated scenarios use stable IDs such as `proc_dev_chain_001` and include
 split/family/seed tags in observations and artifacts.
 
-## Async Replay Rendering
+### Mock Replay Rendering
 
-Core/toy and procedural runs already write `episode.jsonl` and `replay.json`.
-Render them later without rerunning the agent:
+Toy/procedural runs write `episode.jsonl` and `replay.json`. Render schematic
+audit frames later without rerunning the agent:
 
 ```bash
 openttd-le render-core-replay --episode runs/<run_dir>/episode.jsonl --out frames/
@@ -97,37 +357,8 @@ openttd-le render-core-replay --replay runs/<run_dir>/replay.json --out frames/
 openttd-le render-core-replay --replay runs/<run_dir>/replay.json --out replay.mp4 --fps 1
 ```
 
-SVG frames and `index.html` are always produced. MP4 output is optional and
-requires `ffmpeg` on `PATH`; if unavailable, the command still writes frames.
-
-## Quickstart
-
-```bash
-python -m pip install -e .
-openttd-le list-scenarios
-openttd-le eval --agent greedy --scenario coal_easy_001 --runs 1
-openttd-le summarize runs
-```
-
-If the editable console script is not on `PATH`, use:
-
-```bash
-python -m openttd_le.cli eval --agent greedy --scenario coal_easy_001
-```
-
-Run an LLM agent with OpenAI:
-
-```bash
-$env:OPENAI_API_KEY="..."
-openttd-le eval --agent openai --model gpt-5.5 --scenario coal_easy_001
-```
-
-Run through OpenRouter:
-
-```bash
-$env:OPENROUTER_API_KEY="..."
-openttd-le eval --agent openrouter --model openai/gpt-5.5 --scenario coal_easy_001
-```
+SVG frames and `index.html` are always produced. MP4 output here is a schematic
+animation, not OpenTTD gameplay footage.
 
 ## v0.1 Scope
 
@@ -142,10 +373,8 @@ openttd-le eval --agent openrouter --model openai/gpt-5.5 --scenario coal_easy_0
 
 ## Backend Status
 
-`toy` is the default backend and is useful for benchmark development. It is not
-OpenTTD. The `openttd` backend performs real OpenTTD process integration: it
-resolves `openttd.exe`, creates an isolated run directory, and can launch a
-dedicated OpenTTD process.
+`openttd` is the default researcher path for `eval`. It launches real OpenTTD
+through the FIRS bridge. `toy` is an explicit mock backend:
 
 ```bash
 openttd-le eval --backend toy --agent greedy --scenario coal_easy_001
@@ -249,24 +478,22 @@ For bridge testing without an API key:
 openttd-le play-firs-live --workbook scenario.xlsx --allow-heuristic --steps 4
 ```
 
-For FLE-style research runs, use the headless REPL benchmark command:
+For Gym/Farama-style research runs, use `eval`; it routes a separate baseline agent
+through the real OpenTTD/FIRS environment by default:
 
 ```bash
 $env:OPENAI_API_KEY="..."
-openttd-le firs-research-run --workbook scenario.xlsx --model gpt-5.5 --steps 32 --openttd-user-dir .openttd
-openttd-le firs-research-run --workbook scenario.xlsx --task lab_supply_mine_short --steps 8 --openttd-user-dir .openttd
+openttd-le eval --scenario open_play_network_value --workbook scenario.xlsx --model gpt-5.5 --max-steps 32 --openttd-user-dir .openttd
+openttd-le eval --scenario lab_supply_mine_short --workbook scenario.xlsx --model gpt-5.5 --max-steps 8 --openttd-user-dir .openttd
 ```
 
-One research step is one generated Python program executed in a persistent
-namespace. The exposed API is deliberately high-level: `observe()`,
-`build_cargo_route()`, `add_vehicles()`, `wait_months()`,
-`inspect_bottlenecks()`, `borrow_or_repay()`, typed `cargo_chains`,
-`industries`, `finance`, and a small `Prototype` namespace. The benchmark writes
-separate JSONL artifacts for programs, stdout/stderr, observations, actions, and
-rewards so model comparisons do not depend on video recording. Research mode now
-defaults to physical construction: `build_cargo_route()` attempts real OpenTTD
+The benchmark writes separate JSONL artifacts for observations, actions, and
+rewards so model comparisons do not depend on video recording. Research mode
+defaults to physical construction: `build_cargo_route` attempts real OpenTTD
 stations, roads, depots, and vehicles with `allow_virtual=False`, returning typed
-failures when the bridge cannot build a continuous route.
+failures when the bridge cannot build a continuous route. The legacy
+`firs-research-run` command still runs the older persistent Python REPL agent for
+comparison, but it is no longer the main environment contract.
 
 Batch model/task comparisons use:
 

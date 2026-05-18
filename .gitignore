@@ -19,3 +19,4 @@ runs_*/
 client-debug-*.txt
 coal_debug_*.txt
 .env
+/scenario.xlsx
