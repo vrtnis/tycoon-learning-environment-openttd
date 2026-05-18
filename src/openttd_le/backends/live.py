@@ -30,6 +30,7 @@ from openttd_le.research.benchmarks import (
     task_to_workbook_meta,
 )
 from openttd_le.research.scoring import CARGO_VALUE, score_snapshot
+from openttd_le.replay import load_replay, replay_actions
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import read_firs_ops_workbook
 
@@ -961,6 +962,218 @@ def launch_firs_live(
         "server_command": server_cmd,
         "client_command": client_cmd,
         "note": "The visible client remains open after the FIRS objective loop finishes.",
+    }
+    (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
+    return launch_info
+
+
+def launch_firs_replay(
+    *,
+    replay: Path | str,
+    workbook: Path | str | None = None,
+    executable: str | None = None,
+    openttd_user_dir: Path | str | None = None,
+    output_root: Path | str = "runs_replay",
+    resolution: str = "1280x720",
+    record: bool = True,
+    record_source: str | None = None,
+    async_video: bool = True,
+    start_delay: float = 10.0,
+    action_delay: float = 2.0,
+) -> dict[str, Any]:
+    local_user_dir = _set_openttd_user_dir(openttd_user_dir)
+    replay_path = Path(replay)
+    replay_payload = load_replay(replay_path)
+    scenario = replay_payload.get("scenario", {}) or {}
+    replay_run_dir = Path(str(replay_payload.get("run_dir", ""))) if replay_payload.get("run_dir") else replay_path.parent
+    workbook_path = Path(workbook or scenario.get("workbook") or replay_run_dir / "workbook.xlsx")
+    if not workbook_path.exists() and not workbook:
+        fallback = Path("templates") / "firs_ops_plan.xlsx"
+        if fallback.exists():
+            workbook_path = fallback
+    run_config, workbook_meta = read_firs_ops_workbook(workbook_path)
+    if scenario.get("seed") is not None:
+        run_config = replace(run_config, seed=int(scenario["seed"]))
+    if scenario.get("economy"):
+        run_config = replace(run_config, economy=str(scenario["economy"]))
+    actions = replay_actions(replay_payload)
+    if not actions:
+        raise EnvError(f"Replay has no macro-actions: {replay_path}")
+
+    exe = executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
+    if not exe or not Path(exe).exists():
+        raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
+
+    install = verify_firs_installed(local_user_dir)
+    run_dir = _new_run_dir(Path(output_root), suffix="firs_replay")
+    ensure_opengfx()
+    installed = install_live_bridge()
+    game_port = _find_free_port(3979)
+    admin_port = _find_free_port(3977)
+    cfg_text = render_firs_live_config(
+        run_config=run_config,
+        install=install,
+        game_port=game_port,
+        admin_port=admin_port,
+        admin_password=ADMIN_PASSWORD,
+    )
+    artifact_cfg_path = run_dir / "openttd.cfg"
+    artifact_client_cfg_path = run_dir / "openttd-viewer.cfg"
+    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    client_cfg_path = (
+        local_user_dir / f"openttd-le-{run_dir.name}-viewer.cfg" if local_user_dir else artifact_client_cfg_path
+    )
+    cfg_path.write_text(cfg_text, encoding="ascii")
+    client_cfg_text = _with_client_name(cfg_text, f"OpenTTD-LE Replay Viewer {game_port}")
+    client_cfg_path.write_text(client_cfg_text, encoding="ascii")
+    if cfg_path != artifact_cfg_path:
+        artifact_cfg_path.write_text(cfg_text, encoding="ascii")
+    if client_cfg_path != artifact_client_cfg_path:
+        artifact_client_cfg_path.write_text(client_cfg_text, encoding="ascii")
+
+    server_cmd = [
+        str(exe),
+        "-D",
+        f"0.0.0.0:{game_port}",
+        "-g",
+        "-G",
+        str(run_config.seed),
+        "-c",
+        str(cfg_path),
+        "-x",
+        "-X",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+    ]
+    process_cwd = str(local_user_dir or Path(exe).parent)
+    server = _popen_hidden(
+        server_cmd,
+        cwd=process_cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+    client_cmd = [
+        str(exe),
+        "-c",
+        str(client_cfg_path),
+        "-x",
+        "-X",
+        "-n",
+        f"127.0.0.1:{game_port}#0",
+        "-I",
+        "OpenGFX",
+        "-S",
+        "NoSound",
+        "-M",
+        "NoMusic",
+        "-r",
+        resolution,
+    ]
+
+    trace_path = run_dir / "replay_trace.jsonl"
+    summary_path = run_dir / "summary.json"
+    gameplay_path = run_dir / "gameplay.mp4"
+    timelapse_path = run_dir / "gameplay_8x.mp4"
+    client: subprocess.Popen[bytes] | None = None
+    recorder: subprocess.Popen[bytes] | None = None
+    timelapse_process: subprocess.Popen[bytes] | None = None
+    admin = AdminClient("127.0.0.1", admin_port)
+    final_observation: dict[str, Any] | None = None
+    executed_actions = 0
+    failed = True
+    try:
+        admin.connect()
+        admin.send_gamescript({"type": "observe"})
+        observation = _next_observation(admin, timeout=90.0)
+        final_observation = observation
+        client = subprocess.Popen(
+            client_cmd,
+            cwd=process_cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        if record:
+            capture_delay = min(2.0, max(0.0, start_delay))
+            time.sleep(capture_delay)
+            recorder = _start_recording(gameplay_path, source=record_source)
+            time.sleep(max(0.0, start_delay - capture_delay))
+        else:
+            time.sleep(start_delay)
+        with trace_path.open("a", encoding="utf-8") as trace:
+            _write_event(trace, "initial_observation", 0, observation)
+            for index, action in enumerate(actions, start=1):
+                replay_action = dict(action)
+                trace.write(
+                    json.dumps({"event": "replay_action", "step": index, "data": replay_action}, separators=(",", ":"))
+                    + "\n"
+                )
+                admin.send_gamescript({"type": "action", "action": replay_action})
+                result = _next_result(admin, timeout=180.0)
+                observation = _next_observation(admin, timeout=180.0)
+                final_observation = observation
+                executed_actions = index
+                _write_event(trace, "result", index, result)
+                _write_event(trace, "observation", index, observation)
+                time.sleep(action_delay)
+        failed = False
+    finally:
+        admin.close()
+        if recorder is not None:
+            _stop_recording(recorder)
+            if async_video:
+                timelapse_process = _start_timelapse(gameplay_path, timelapse_path)
+            else:
+                _write_timelapse(gameplay_path, timelapse_path)
+        if failed:
+            _terminate_process(client)
+            _terminate_process(server)
+
+    routes = final_observation.get("routes", []) if final_observation else []
+    summary = {
+        "objective": "firs_replay",
+        "failed": failed,
+        "source_replay": str(replay_path),
+        "source_run_dir": replay_payload.get("run_dir"),
+        "seed": run_config.seed,
+        "economy": run_config.economy,
+        "actions_requested": len(actions),
+        "actions_executed": executed_actions,
+        "final_tick": final_observation.get("tick") if final_observation else None,
+        "final_bank_balance": final_observation.get("bank_balance") if final_observation else None,
+        "routes": routes,
+        "trace": str(trace_path),
+        "run_dir": str(run_dir),
+        "workbook": str(workbook_path),
+    }
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    launch_info = {
+        "run_dir": str(run_dir),
+        "server_pid": server.pid,
+        "client_pid": client.pid if client is not None else None,
+        "game_port": game_port,
+        "admin_port": admin_port,
+        "source_replay": str(replay_path),
+        "actions": len(actions),
+        "trace": str(trace_path),
+        "summary": str(summary_path),
+        "recording": str(gameplay_path) if gameplay_path.exists() else None,
+        "timelapse": str(timelapse_path) if record else None,
+        "timelapse_pid": timelapse_process.pid if timelapse_process is not None else None,
+        "timelapse_async": bool(async_video and timelapse_process is not None),
+        "record_source": record_source or os.environ.get("OPENTTD_RECORD_SOURCE") or ("window-region=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")),
+        "installed": installed,
+        "firs_newgrf": str(install.newgrf_path),
+        "openttd_user_dir": str(local_user_dir) if local_user_dir else None,
+        "server_command": server_cmd,
+        "client_command": client_cmd,
+        "note": "Replay client remains open after macro-actions finish. Timelapse may continue encoding if timelapse_async is true.",
     }
     (run_dir / "launch.json").write_text(json.dumps(launch_info, indent=2), encoding="utf-8")
     return launch_info
@@ -2447,9 +2660,25 @@ def _terminate_process(process: subprocess.Popen[bytes] | None) -> None:
 
 
 def _write_timelapse(source: Path, target: Path) -> None:
+    process = _start_timelapse(source, target)
+    if process is None:
+        return
+    try:
+        process.wait(timeout=600)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+
+def _start_timelapse(source: Path, target: Path) -> subprocess.Popen[bytes] | None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not source.exists():
-        return
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
     command = [
         ffmpeg,
         "-y",
@@ -2460,7 +2689,7 @@ def _write_timelapse(source: Path, target: Path) -> None:
         "-an",
         str(target),
     ]
-    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return _popen_hidden(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
 
 
 def _find_free_port(start: int) -> int:

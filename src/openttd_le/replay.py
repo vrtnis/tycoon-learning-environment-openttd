@@ -10,6 +10,20 @@ from typing import Any
 TRACE_NAMES = ("firs_trace.jsonl", "coal_trace.jsonl", "live_trace.jsonl")
 
 
+def load_replay(path: str | Path) -> dict[str, Any]:
+    replay_path = Path(path)
+    return json.loads(replay_path.read_text(encoding="utf-8"))
+
+
+def replay_actions(replay: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for step in replay.get("steps", []) or []:
+        for action in step.get("actions", []) or []:
+            if isinstance(action, dict) and isinstance(action.get("type"), str):
+                actions.append(dict(action))
+    return actions
+
+
 def export_replay(run_dir: str | Path, out: str | Path | None = None) -> Path:
     root = Path(run_dir)
     if not root.exists():

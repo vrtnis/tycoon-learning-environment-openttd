@@ -12,6 +12,7 @@ from openttd_le.backends.live import (
     launch_coal_objective,
     launch_firs_benchmark,
     launch_firs_live,
+    launch_firs_replay,
     launch_firs_research,
     launch_gpt_live,
     launch_route_builder_benchmark,
@@ -198,6 +199,20 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--run", required=True)
     replay_parser.add_argument("--out", default=None)
 
+    play_replay_parser = subparsers.add_parser("play-replay", help="Replay macro-actions from replay.json in OpenTTD/FIRS.")
+    play_replay_parser.add_argument("--replay", required=True)
+    play_replay_parser.add_argument("--workbook", default=None)
+    play_replay_parser.add_argument("--executable", default=None)
+    play_replay_parser.add_argument("--openttd-user-dir", default=None)
+    play_replay_parser.add_argument("--out", default="runs_replay")
+    play_replay_parser.add_argument("--resolution", default="1280x720")
+    play_replay_parser.add_argument("--record", dest="record", action="store_true", default=True)
+    play_replay_parser.add_argument("--no-record", dest="record", action="store_false")
+    play_replay_parser.add_argument("--record-source", default=None)
+    play_replay_parser.add_argument("--sync-video", action="store_true", help="Block until 8x timelapse encoding finishes.")
+    play_replay_parser.add_argument("--start-delay", type=float, default=10.0)
+    play_replay_parser.add_argument("--action-delay", type=float, default=2.0)
+
     args = parser.parse_args(argv)
     if args.command == "list-scenarios":
         return _list_scenarios(args.scenario_file)
@@ -334,6 +349,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "export-replay":
         path = export_replay(Path(args.run), Path(args.out) if args.out else None)
         print(json.dumps({"replay": str(path)}, indent=2))
+        return 0
+    if args.command == "play-replay":
+        payload = launch_firs_replay(
+            replay=Path(args.replay),
+            workbook=Path(args.workbook) if args.workbook else None,
+            executable=args.executable,
+            openttd_user_dir=Path(args.openttd_user_dir) if args.openttd_user_dir else None,
+            output_root=Path(args.out),
+            resolution=args.resolution,
+            record=args.record,
+            record_source=args.record_source,
+            async_video=not args.sync_video,
+            start_delay=args.start_delay,
+            action_delay=args.action_delay,
+        )
+        print(json.dumps(payload, indent=2))
         return 0
     raise AssertionError(args.command)
 

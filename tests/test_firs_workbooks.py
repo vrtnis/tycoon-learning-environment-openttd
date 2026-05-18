@@ -20,7 +20,7 @@ from openttd_le.backends.live import (
     _parse_json,
     _route_already_registered,
 )
-from openttd_le.replay import export_replay
+from openttd_le.replay import export_replay, replay_actions
 from openttd_le.workbooks.export import export_run_to_xlsx
 from openttd_le.workbooks.template import create_firs_ops_workbook, read_firs_ops_workbook
 
@@ -127,6 +127,7 @@ class FIRSWorkbookTests(unittest.TestCase):
             self.assertEqual(replay["steps"][0]["program"], "print('build')")
             self.assertEqual(replay["steps"][0]["actions"][0]["type"], "build_cargo_route")
             self.assertEqual(replay["steps"][0]["results"][0]["route_id"], "route_1")
+            self.assertEqual(replay_actions(replay)[0]["type"], "build_cargo_route")
 
 
 class FIRSConfigTests(unittest.TestCase):
