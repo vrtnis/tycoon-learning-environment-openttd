@@ -40,18 +40,18 @@
       "seed": 1,
       "economy": "basic_temperate",
       "steps": 16,
-      "prompt": "Build a coal route to the steel mill, then wait for route progress.",
+      "prompt": "Build an iron ore route to the steel mill, then wait for route progress.",
       "success": {
         "min_routes": 1,
         "min_delivered_routes": 1,
-        "required_cargo": "COAL"
+        "required_cargo": "IORE"
       },
       "objectives": [
         {
           "step": 1,
-          "source_type": "Coal Mine",
+          "source_type": "Iron Ore Mine",
           "destination_type": "Steel Mill",
-          "cargo": "COAL",
+          "cargo": "IORE",
           "deadline_year": 3,
           "required_delivered": 1,
           "weight": 100
@@ -64,22 +64,22 @@
       "difficulty": "easy",
       "mode": "lab",
       "tags": ["raw_material", "single_route", "short_horizon"],
-      "description": "Short-horizon coal-to-processor construction and first-delivery task.",
+      "description": "Short-horizon iron-ore-to-processor construction and first-delivery task.",
       "seed": 1,
       "economy": "basic_temperate",
       "steps": 8,
-      "prompt": "Build one coal route quickly and wait for enough time to confirm delivery.",
+      "prompt": "Build one iron ore route quickly and wait for enough time to confirm delivery.",
       "success": {
         "min_routes": 1,
         "min_delivered_routes": 1,
-        "required_cargo": "COAL"
+        "required_cargo": "IORE"
       },
       "objectives": [
         {
           "step": 1,
-          "source_type": "Coal Mine",
+          "source_type": "Iron Ore Mine",
           "destination_type": "Steel Mill",
-          "cargo": "COAL",
+          "cargo": "IORE",
           "deadline_year": 2,
           "required_delivered": 1,
           "weight": 100
@@ -96,19 +96,19 @@
       "seed": 1,
       "economy": "basic_temperate",
       "steps": 20,
-      "prompt": "Build a coal route, avoid low-quality duplicate construction, and wait until it is profitable.",
+      "prompt": "Build an iron ore route, avoid low-quality duplicate construction, and wait until it is profitable.",
       "success": {
         "min_routes": 1,
         "min_delivered_routes": 1,
-        "required_cargo": "COAL",
+        "required_cargo": "IORE",
         "min_network_value": 20
       },
       "objectives": [
         {
           "step": 1,
-          "source_type": "Coal Mine",
+          "source_type": "Iron Ore Mine",
           "destination_type": "Steel Mill",
-          "cargo": "COAL",
+          "cargo": "IORE",
           "deadline_year": 3,
           "required_delivered": 2,
           "weight": 100
@@ -125,7 +125,7 @@
       "seed": 1,
       "economy": "basic_temperate",
       "steps": 32,
-      "prompt": "Build coal to the steel mill first. After first delivery, build a downstream steel route if available.",
+      "prompt": "Build iron ore to the steel mill first. After first delivery, build a downstream steel route if available.",
       "success": {
         "min_routes": 2,
         "min_delivered_routes": 1,
@@ -134,9 +134,9 @@
       "objectives": [
         {
           "step": 1,
-          "source_type": "Coal Mine",
+          "source_type": "Iron Ore Mine",
           "destination_type": "Steel Mill",
-          "cargo": "COAL",
+          "cargo": "IORE",
           "deadline_year": 2,
           "required_delivered": 1,
           "weight": 70
@@ -144,7 +144,7 @@
         {
           "step": 2,
           "source_type": "Steel Mill",
-          "destination_type": "Metal Works",
+          "destination_type": "Factory",
           "cargo": "STEL",
           "deadline_year": 3,
           "required_delivered": 1,
@@ -171,9 +171,9 @@
       "objectives": [
         {
           "step": 1,
-          "source_type": "Coal Mine",
+          "source_type": "Iron Ore Mine",
           "destination_type": "Steel Mill",
-          "cargo": "COAL",
+          "cargo": "IORE",
           "deadline_year": 3,
           "required_delivered": 2,
           "weight": 100
@@ -264,14 +264,14 @@
       "success": {
         "min_routes": 1,
         "min_delivered_routes": 1,
-        "required_cargo": "COAL"
+        "required_cargo": "IORE"
       },
       "objectives": [
         {
           "step": 1,
-          "source_type": "Coal Mine",
+          "source_type": "Iron Ore Mine",
           "destination_type": "Steel Mill",
-          "cargo": "COAL",
+          "cargo": "IORE",
           "deadline_year": 3,
           "required_delivered": 1,
           "weight": 100

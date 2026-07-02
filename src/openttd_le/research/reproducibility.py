@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +52,69 @@ MONEY_KEYS = {
 }
 MONEY_QUANTUM = 100
 
+DETERMINISM_CONTRACT = {
+    "schema": "openttd-le-determinism-contract-v1",
+    "allowed_runtime_differences": [
+        "absolute local paths",
+        "run directories",
+        "process ids",
+        "ephemeral ports",
+        "timestamps",
+    ],
+    "strict_public_trace": [
+        "encoded observations",
+        "action masks",
+        "candidate ordering",
+        "selected action indices",
+        "selected action payloads",
+        "rewards",
+        "terminated flags",
+        "truncated flags",
+        "route outcomes exposed through public info",
+        "cargo delivered",
+        "money and profit values exposed through public info",
+    ],
+}
+
+RUNTIME_LOCK_VOLATILE_KEYS = {
+    "admin_port",
+    "benchmark_file",
+    "cfg",
+    "cfg_sha256",
+    "company_ai_dir",
+    "firs_newgrf",
+    "game_port",
+    "gamescript_dir",
+    "opengfx_baseset",
+    "openttd_executable",
+    "openttd_user_dir",
+    "process_cwd",
+    "run_dir",
+    "server_command",
+    "workbook",
+}
+
+TRACE_RUNTIME_VOLATILE_KEYS = {
+    "admin_port",
+    "client_pid",
+    "created_at",
+    "game_port",
+    "openttd_user_dir",
+    "pid",
+    "recording",
+    "run_dir",
+    "server_pid",
+    "timelapse",
+    "trace",
+}
+
 
 def normalize_gym_info(info: dict[str, Any]) -> dict[str, Any]:
     keep = {
         "actions",
         "action_mask",
         "candidate_actions",
+        "candidate_planning",
         "deterministic",
         "invalid_action",
         "native_observation",
@@ -132,6 +190,51 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def normalize_determinism_trace(value: Any, *, mode: str = "strict") -> Any:
+    """Normalize a public Gym trace for deterministic rollout comparison.
+
+    Strict mode removes only runtime-only fields. Semantic mode preserves the
+    older smoke-test behavior for reports that intentionally ignore simulator
+    internals such as station ids and waiting cargo.
+    """
+
+    if mode not in {"strict", "semantic"}:
+        raise ValueError("mode must be 'strict' or 'semantic'")
+    if mode == "semantic":
+        return normalize_value(value)
+    return _normalize_strict_value(value)
+
+
+def normalize_runtime_lock(lock: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the comparable part of a runtime lock.
+
+    The exact lock still records paths, ports and command lines for auditability.
+    This normalized form keeps only values that must be identical across repeat
+    runs for a fixed seed and action sequence.
+    """
+
+    if not lock:
+        return {}
+    normalized = {}
+    for key in sorted(lock):
+        if key in RUNTIME_LOCK_VOLATILE_KEYS:
+            continue
+        value = lock[key]
+        if key.endswith("_path") or key.endswith("_dir"):
+            continue
+        normalized[key] = _normalize_strict_value(value)
+    return normalized
+
+
+def stable_json_sha256(value: Any) -> str:
+    payload = json.dumps(_normalize_strict_value(value), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def determinism_contract() -> dict[str, Any]:
+    return dict(DETERMINISM_CONTRACT)
+
+
 def _quantize_money(value: int | float) -> int:
     return int(round(float(value) / MONEY_QUANTUM) * MONEY_QUANTUM)
 
@@ -165,6 +268,29 @@ def first_diff(left: Any, right: Any, *, path: str = "$") -> dict[str, Any] | No
     if left != right:
         return {"path": path, "left": left, "right": right, "reason": "value_mismatch"}
     return None
+
+
+def _normalize_strict_value(value: Any) -> Any:
+    if hasattr(value, "tolist"):
+        return _normalize_strict_value(value.tolist())
+    if isinstance(value, Path):
+        return "<path>"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key in sorted(value):
+            if key in TRACE_RUNTIME_VOLATILE_KEYS:
+                continue
+            item = value[key]
+            if isinstance(item, Path):
+                result[key] = "<path>"
+            else:
+                result[key] = _normalize_strict_value(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_normalize_strict_value(item) for item in value]
+    if isinstance(value, float):
+        return round(value, 6)
+    return value
 
 
 def file_sha256(path: Path | str | None) -> str | None:

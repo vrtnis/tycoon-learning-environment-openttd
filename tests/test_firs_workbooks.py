@@ -35,7 +35,7 @@ class FIRSWorkbookTests(unittest.TestCase):
 
             self.assertEqual(config.economy, "basic_temperate")
             self.assertEqual(config.economy_parameter, 0)
-            self.assertEqual(meta["objectives"][0]["source_type"], "Coal Mine")
+            self.assertEqual(meta["objectives"][0]["source_type"], "Iron Ore Mine")
             self.assertEqual(meta["objectives"][1]["cargo"], "STEL")
 
     def test_export_run_to_xlsx_writes_report(self) -> None:
@@ -91,7 +91,7 @@ class FIRSWorkbookTests(unittest.TestCase):
 
             self.assertTrue(report.exists())
             _, meta = read_firs_ops_workbook(workbook)
-            self.assertEqual(meta["objectives"][0]["cargo"], "COAL")
+            self.assertEqual(meta["objectives"][0]["cargo"], "IORE")
 
     def test_export_replay_writes_programs_actions_and_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

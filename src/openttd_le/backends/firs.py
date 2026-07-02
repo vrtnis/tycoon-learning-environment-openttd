@@ -48,16 +48,16 @@ class FIRSRunConfig:
     target_chain: tuple[dict[str, Any], ...] = (
         {
             "step": 1,
-            "source_type": "Coal Mine",
+            "source_type": "Iron Ore Mine",
             "destination_type": "Steel Mill",
-            "cargo": "COAL",
+            "cargo": "IORE",
             "deadline_year": 1,
             "required_delivered": 1,
         },
         {
             "step": 2,
             "source_type": "Steel Mill",
-            "destination_type": "Metal Works",
+            "destination_type": "Factory",
             "cargo": "STEL",
             "deadline_year": 3,
             "required_delivered": 1,

@@ -160,6 +160,8 @@ class FIRSReplSession:
         self.last_actions: list[dict[str, Any]] = []
         self.failed_route_keys: set[tuple[Any, Any, Any]] = set()
         self.virtual_route_counter = 1
+        self.plan_counter = 1
+        self.action_counter = 0
         self.env: dict[str, Any] = {
             "__builtins__": SAFE_REPL_BUILTINS,
             "__name__": "openttd_le_firs_repl",
@@ -171,6 +173,7 @@ class FIRSReplSession:
         self.env.update(
             {
                 "observe": self.observe,
+                "plan_cargo_route": self.plan_cargo_route,
                 "build_cargo_route": self.build_cargo_route,
                 "add_vehicles": self.add_vehicles,
                 "wait_months": self.wait_months,
@@ -186,20 +189,22 @@ class FIRSReplSession:
 
     def candidate_routes(self) -> list[dict[str, Any]]:
         graph = self.observation.get("industry_graph", [])
-        candidates = _candidate_firs_pairs(graph, self.workbook_meta.get("objectives", []), limit=12)
+        objectives = self.workbook_meta.get("objectives", [])
+        task_mode = str(self.task_meta.get("mode", "")).lower()
+        candidates = _candidate_firs_pairs(graph, objectives, limit=12)
         if not candidates:
             candidates = _candidate_firs_pairs_from_io(
                 self.observation,
-                self.workbook_meta.get("objectives", []),
+                objectives,
                 limit=12,
             )
-        if not candidates:
+        if not candidates and (not objectives or task_mode != "lab"):
             candidates = _candidate_open_play_pairs(self.observation, limit=12)
         routes = self.observation.get("routes", [])
         if routes:
             candidates = [pair for pair in candidates if not _route_already_registered(pair, routes)]
         candidates = [pair for pair in candidates if _route_key(pair) not in self.failed_route_keys]
-        if not candidates:
+        if not candidates and (not objectives or task_mode != "lab"):
             candidates = [
                 pair
                 for pair in _candidate_open_play_pairs(self.observation, limit=12)
@@ -257,15 +262,20 @@ class FIRSReplSession:
             result = self._advance_python_virtual_routes(action)
             self.last_actions.append({"action": action, "result": result, "observation": self.observation})
             return result
+        self.action_counter += 1
+        request_id = str(action.get("request_id") or f"action_{self.action_counter:06d}")
+        action = {**action, "request_id": request_id}
         self.admin.send_gamescript({"type": "action", "action": action})
         try:
-            result = _next_result(self.admin, timeout=90.0)
+            timeout = 240.0 if action.get("type") == "build_cargo_route" else 120.0
+            result = _next_result(self.admin, timeout=timeout, request_id=request_id)
             observation = _next_observation(self.admin, timeout=90.0, reasons=("after_action",))
         except Exception as exc:
             result = {
                 "type": "result",
                 "step": self.observation.get("step"),
                 "action_type": action.get("type"),
+                "request_id": request_id,
                 "error": "action_timeout_or_error",
                 "detail": str(exc),
             }
@@ -284,6 +294,35 @@ class FIRSReplSession:
         self.observation = _next_observation(self.admin, timeout=90.0, reasons=("requested",))
         self._refresh_env()
         return self.observation
+
+    def plan_cargo_route(
+        self,
+        source_id: int,
+        destination_id: int,
+        cargo_id: int,
+        max_path_tiles: int = 256,
+        station_candidate_limit: int = 8,
+    ) -> dict[str, Any]:
+        action = {
+            "type": "build_cargo_route",
+            "source_id": int(source_id),
+            "destination_id": int(destination_id),
+            "cargo_id": int(cargo_id),
+            "max_path_tiles": int(max_path_tiles),
+            "station_candidate_limit": int(station_candidate_limit),
+            "physical": True,
+            "allow_virtual": False,
+            "preview_roads": True,
+        }
+        return self.plan_cargo_route_action(action)
+
+    def plan_cargo_route_action(self, action: dict[str, Any], *, timeout: float = 45.0) -> dict[str, Any]:
+        planned_action = dict(action)
+        request_id = str(planned_action.get("request_id") or f"plan_{self.plan_counter:06d}")
+        self.plan_counter += 1
+        planned_action["request_id"] = request_id
+        self.admin.send_gamescript({"type": "plan_cargo_route", "action": planned_action})
+        return _next_result(self.admin, timeout=timeout, request_id=request_id)
 
     def build_cargo_route(
         self,
@@ -305,6 +344,7 @@ class FIRSReplSession:
             "vehicles": int(vehicles if vehicles is not None else self.vehicles_per_route),
             "physical": bool(physical),
             "max_path_tiles": int(max_path_tiles),
+            "station_candidate_limit": 8,
             "allow_virtual": bool(allow_virtual),
             "preview_roads": bool(preview_roads),
             "label": label or "repl physical cargo route",
@@ -1560,6 +1600,38 @@ def launch_route_builder_benchmark(
                 construction_index = len(attempt_rows) + 1
                 action = _build_action_from_pair(pair, route_vehicles, f"route builder benchmark {construction_index}")
                 action["max_path_tiles"] = int(max_path_tiles)
+                action["station_candidate_limit"] = 8
+                try:
+                    plan_request_id = f"route_builder_{probe_index:04d}"
+                    admin.send_gamescript({"type": "plan_cargo_route", "action": {**action, "request_id": plan_request_id}})
+                    plan = _next_result(admin, timeout=60.0, request_id=plan_request_id)
+                except Exception as exc:
+                    plan = {
+                        "type": "result",
+                        "action_type": "plan_cargo_route",
+                        "feasible": False,
+                        "error": "route_plan_timeout_or_error",
+                        "detail": str(exc),
+                    }
+                if not plan.get("feasible"):
+                    skipped_row = {
+                        "probe": probe_index,
+                        "reason": plan.get("error") or "route_plan_infeasible",
+                        "source_id": pair.get("source_id"),
+                        "source_name": pair.get("source_name"),
+                        "destination_id": pair.get("destination_id"),
+                        "destination_name": pair.get("destination_name"),
+                        "cargo_id": pair.get("cargo_id"),
+                        "cargo_label": pair.get("cargo_label"),
+                        "distance": pair.get("distance"),
+                        "production": pair.get("production"),
+                        "result": plan,
+                    }
+                    skipped_rows.append(skipped_row)
+                    final_observation = observation
+                    _write_jsonl(skipped_file, skipped_row)
+                    _write_jsonl(observations_file, {"probe": probe_index, "skipped": True, "observation": observation})
+                    continue
                 before_count = len(observation.get("routes", []) or [])
                 result: dict[str, Any]
                 action_timed_out = False
@@ -2260,6 +2332,10 @@ def _industry_locations_from_graph(observation: dict[str, Any]) -> dict[int, tup
             and isinstance(pair.get("destination_y"), int)
         ):
             locations[destination_id] = (int(pair["destination_x"]), int(pair["destination_y"]))
+    for item in list(observation.get("industry_outputs", []) or []) + list(observation.get("industry_inputs", []) or []):
+        industry_id = item.get("industry_id")
+        if isinstance(industry_id, int) and isinstance(item.get("x"), int) and isinstance(item.get("y"), int):
+            locations[industry_id] = (int(item["x"]), int(item["y"]))
     return locations
 
 
@@ -2292,12 +2368,19 @@ def _route_builder_candidate_pairs(
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[Any, Any, Any]] = set()
+    objectives = workbook_meta.get("objectives", [])
+    task_mode = str((workbook_meta.get("benchmark_task") or {}).get("mode", "")).lower()
     sources = [
-        _candidate_firs_pairs(observation.get("industry_graph", []), workbook_meta.get("objectives", []), limit=limit),
-        _candidate_firs_pairs_from_io(observation, workbook_meta.get("objectives", []), limit=limit),
-        _candidate_open_play_pairs(observation, limit=limit * 2),
-        _candidate_open_play_pairs_from_io(observation, limit=limit * 2),
+        _candidate_firs_pairs(observation.get("industry_graph", []), objectives, limit=limit),
+        _candidate_firs_pairs_from_io(observation, objectives, limit=limit),
     ]
+    if not objectives or task_mode != "lab":
+        sources.extend(
+            [
+                _candidate_open_play_pairs(observation, limit=limit * 2),
+                _candidate_open_play_pairs_from_io(observation, limit=limit * 2),
+            ]
+        )
     for source in sources:
         for pair in source:
             key = _route_key(pair)
@@ -2418,6 +2501,7 @@ def _build_action_from_pair(pair: dict[str, Any], vehicles: int, label: str) -> 
         "vehicles": vehicles,
         "physical": True,
         "max_path_tiles": 256,
+        "station_candidate_limit": 8,
         "allow_virtual": False,
         "preview_roads": False,
         "label": label,
@@ -2548,11 +2632,15 @@ def _next_observation(admin: AdminClient, timeout: float, reasons: tuple[str, ..
     raise EnvError("Timed out waiting for observation.")
 
 
-def _next_result(admin: AdminClient, timeout: float) -> dict[str, Any]:
+def _next_result(admin: AdminClient, timeout: float, request_id: str | None = None) -> dict[str, Any]:
     deadline = time.time() + timeout
     while time.time() < deadline:
         message = admin.read_gamescript(timeout=deadline - time.time())
         if message.get("type") == "result":
+            if request_id is not None and message.get("request_id") != request_id:
+                continue
+            if request_id is None and message.get("action_type") == "plan_cargo_route":
+                continue
             return message
     raise EnvError("Timed out waiting for action result.")
 

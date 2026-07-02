@@ -37,7 +37,7 @@ def _scenario_rows(config: FIRSRunConfig) -> list[list[Any]]:
         ["Excel workbook -> GPT plan -> OpenTTD/FIRS execution -> updated Excel scorecard"],
         ["Field", "Value", "Notes"],
         ["seed", config.seed, "OpenTTD generation_seed for reproducible maps."],
-        ["economy", config.economy, "FIRS economy. First slice uses basic_temperate for Coal Mine -> Steel Mill."],
+        ["economy", config.economy, "FIRS economy. First slice uses basic_temperate for Iron Ore Mine -> Steel Mill."],
         ["budget", config.budget, "Planning budget visible to GPT."],
         ["years", config.years, "Objective horizon."],
         ["allowed_modes", ",".join(config.allowed_modes), "Currently the GameScript macro builder uses road vehicles."],

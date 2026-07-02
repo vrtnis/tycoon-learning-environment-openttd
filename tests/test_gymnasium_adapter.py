@@ -94,7 +94,57 @@ class GymnasiumAdapterTests(unittest.TestCase):
             self.assertEqual(reward, 25.0)
             self.assertTrue(terminated)
             self.assertFalse(truncated)
-            self.assertEqual(float(obs["cargo_delivered"]), 20.0)
+            self.assertEqual(float(obs["cargo_delivered"][0]), 20.0)
+        finally:
+            env.close()
+
+    def test_firs_adapter_masks_physically_infeasible_candidates(self) -> None:
+        try:
+            import gymnasium  # noqa: F401
+        except ImportError:
+            self.skipTest("gymnasium optional dependency is not installed")
+
+        from openttd_le.adapters.gymnasium import OpenTTDFIRSGymEnv
+
+        class FakeFIRSEnv:
+            def __init__(self) -> None:
+                self.last_action = None
+
+            def reset(self, *, seed: int | None = None):
+                observation = {
+                    "tick": 0,
+                    "bank_balance": 500000,
+                    "routes": [],
+                    "candidate_actions": [
+                        {
+                            "id": "build_route_1",
+                            "kind": "build_cargo_route",
+                            "feasible": False,
+                            "diagnostics": ["no_path_between_station_candidates"],
+                            "route": {"production": 120},
+                            "action": {"type": "build_cargo_route", "source_id": 1, "destination_id": 2, "cargo_id": 3},
+                        }
+                    ],
+                }
+                return observation, {"candidate_actions": observation["candidate_actions"]}
+
+            def step(self, action):
+                self.last_action = action
+                observation = {"tick": 2220, "bank_balance": 499900, "routes": [], "candidate_actions": []}
+                return observation, -2.0, False, False, {"candidate_actions": []}
+
+            def close(self) -> None:
+                return None
+
+        fake = FakeFIRSEnv()
+        env = OpenTTDFIRSGymEnv(env=fake, max_candidates=4, invalid_action_penalty=-5.0)
+        try:
+            obs, info = env.reset(seed=1)
+            self.assertEqual(int(obs["action_mask"][0]), 0)
+            obs, reward, terminated, truncated, info = env.step(0)
+            self.assertEqual(fake.last_action["type"], "wait_months")
+            self.assertTrue(info["invalid_action"])
+            self.assertEqual(reward, -7.0)
         finally:
             env.close()
 
@@ -129,6 +179,7 @@ class GymnasiumAdapterTests(unittest.TestCase):
                 return observation, {
                     "run_dir": "volatile",
                     "candidate_actions": observation["candidate_actions"],
+                    "candidate_planning": {"plan_attempts": 1, "proven_feasible": 1, "unknown": 0},
                     "native_observation": observation,
                 }
 
@@ -164,13 +215,14 @@ class GymnasiumAdapterTests(unittest.TestCase):
             self.assertEqual(env.spec.id, FIRS_DETERMINISTIC_GYM_ID)
             self.assertFalse(env.spec.nondeterministic)
             obs, info = env.reset(seed=1)
-            self.assertEqual(float(obs["tick"]), 0.0)
+            self.assertEqual(float(obs["tick"][0]), 0.0)
             self.assertNotIn("run_dir", info)
+            self.assertEqual(info["candidate_planning"]["plan_attempts"], 1)
             self.assertNotIn("tick", info["native_observation"])
             self.assertEqual(info["native_observation"]["decision_step"], 0)
 
             obs, _reward, _terminated, _truncated, info = env.step(0)
-            self.assertEqual(float(obs["tick"]), 1.0)
+            self.assertEqual(float(obs["tick"][0]), 1.0)
             self.assertNotIn("source_station", info["result"])
             self.assertNotIn("vehicle_details", info["native_observation"]["routes"][0])
         finally:

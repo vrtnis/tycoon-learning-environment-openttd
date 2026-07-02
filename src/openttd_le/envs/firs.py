@@ -4,6 +4,8 @@ import os
 import socket
 import subprocess
 import hashlib
+import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,10 @@ class OpenTTDFIRSEnv:
         max_steps: int | None = None,
         step_timeout: float = 90.0,
         deterministic: bool = False,
+        candidate_route_consider_limit: int = 5,
+        candidate_plan_attempt_limit: int = 1,
+        candidate_stop_after_feasible: int = 1,
+        candidate_plan_timeout: float = 30.0,
     ) -> None:
         self.workbook_path = Path(workbook)
         self.task_id = task_id
@@ -66,6 +72,10 @@ class OpenTTDFIRSEnv:
         self.max_steps_override = max_steps
         self.step_timeout = step_timeout
         self.deterministic = bool(deterministic)
+        self.candidate_route_consider_limit = max(0, int(candidate_route_consider_limit))
+        self.candidate_plan_attempt_limit = max(0, int(candidate_plan_attempt_limit))
+        self.candidate_stop_after_feasible = max(0, int(candidate_stop_after_feasible))
+        self.candidate_plan_timeout = max(0.1, float(candidate_plan_timeout))
 
         self.run_config: Any | None = None
         self.workbook_meta: dict[str, Any] = {}
@@ -73,6 +83,7 @@ class OpenTTDFIRSEnv:
         self.local_user_dir: Path | None = None
         self.install: Any | None = None
         self.installed: dict[str, str] = {}
+        self.opengfx_path: Path | None = None
         self.run_dir: Path | None = None
         self.cfg_path: Path | None = None
         self.server_cmd: list[str] = []
@@ -90,6 +101,9 @@ class OpenTTDFIRSEnv:
         self.failed = True
         self.max_steps = max_steps or 32
         self.runtime_lock: dict[str, Any] = {}
+        self._candidate_cache_key: tuple[Any, ...] | None = None
+        self._candidate_cache: list[dict[str, Any]] | None = None
+        self.candidate_planning_summary: dict[str, Any] = {}
 
     def reset(self, *, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         self.close()
@@ -111,11 +125,12 @@ class OpenTTDFIRSEnv:
         exe = self.executable or os.environ.get("OPENTTD_EXECUTABLE") or _find_openttd()
         if not exe or not Path(exe).exists():
             raise EnvError("OpenTTD executable not found. Install OpenTTD or set OPENTTD_EXECUTABLE.")
-        self.executable_path = str(Path(exe))
+        exe_path = Path(exe).expanduser().resolve()
+        self.executable_path = str(exe_path)
 
         self.install = verify_firs_installed(self.local_user_dir)
         self.run_dir = _new_run_dir(self.output_root, suffix="firs_env")
-        ensure_opengfx()
+        self.opengfx_path = ensure_opengfx()
         self.installed = install_live_bridge()
         game_port, admin_port = _allocate_distinct_ports()
         self.game_port = game_port
@@ -129,7 +144,7 @@ class OpenTTDFIRSEnv:
         )
         artifact_cfg_path = self.run_dir / "openttd.cfg"
         cfg_path = (
-            self.local_user_dir / f"openttd-le-{self.run_dir.name}.cfg"
+            self.local_user_dir / f"tycoonle-openttd-{self.run_dir.name}.cfg"
             if self.local_user_dir
             else artifact_cfg_path
         )
@@ -138,7 +153,7 @@ class OpenTTDFIRSEnv:
             artifact_cfg_path.write_text(cfg_text, encoding="ascii")
 
         self.server_cmd = [
-            str(exe),
+            str(exe_path),
             "-D",
             f"0.0.0.0:{game_port}",
             "-g",
@@ -155,7 +170,7 @@ class OpenTTDFIRSEnv:
             "-M",
             "NoMusic",
         ]
-        self.process_cwd = str(self.local_user_dir or Path(exe).parent)
+        self.process_cwd = str(self.local_user_dir or exe_path.parent)
         self.server = _popen_hidden(
             self.server_cmd,
             cwd=self.process_cwd,
@@ -188,6 +203,11 @@ class OpenTTDFIRSEnv:
         self.failed = False
         self.max_steps = self.max_steps_override or (task.steps if task is not None else 32)
         self.runtime_lock = self._build_runtime_lock()
+        if self.run_dir is not None:
+            (self.run_dir / "runtime_lock.json").write_text(json.dumps(self.runtime_lock, indent=2), encoding="utf-8")
+        self._candidate_cache_key = None
+        self._candidate_cache = None
+        self.candidate_planning_summary = {}
         return self._observation_with_candidates(observation), self._info(result=None, reward_details=None)
 
     def step(self, action: dict[str, Any]) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
@@ -203,10 +223,16 @@ class OpenTTDFIRSEnv:
         self.total_reward += reward
         self.previous_snapshot = current
         self.executed_steps += 1
+        self._candidate_cache_key = None
+        self._candidate_cache = None
         self.completed = _firs_objective_done(self.observation, self.workbook_meta)
         if self.task is not None and _benchmark_success(current, self.task.success):
             self.completed = True
-        truncated = self.executed_steps >= self.max_steps and not self.completed
+        action_error = str(result.get("error") or "") if isinstance(result, dict) else ""
+        timed_out = action_error == "action_timeout_or_error"
+        if timed_out:
+            self.failed = True
+        truncated = (timed_out or self.executed_steps >= self.max_steps) and not self.completed
         return (
             self._observation_with_candidates(self.observation),
             reward,
@@ -216,32 +242,21 @@ class OpenTTDFIRSEnv:
         )
 
     def candidate_actions(self) -> list[dict[str, Any]]:
-        if self.session is None:
+        if self.session is None or self.observation is None:
             return []
+        cache_key = self._candidate_cache_fingerprint()
+        if self._candidate_cache_key == cache_key and self._candidate_cache is not None:
+            return [dict(item) for item in self._candidate_cache]
         candidates: list[dict[str, Any]] = []
-        for index, route in enumerate(self.session.candidate_routes()):
-            action = {
-                "type": "build_cargo_route",
-                "source_id": route["source_id"],
-                "destination_id": route["destination_id"],
-                "cargo_id": route["cargo_id"],
-                "vehicles": int(getattr(self.run_config, "vehicles_per_route", 5)),
-                "physical": True,
-                "max_path_tiles": 256,
-                "allow_virtual": False,
-                "preview_roads": False,
-                "label": f"candidate_route_{index + 1}",
-            }
-            candidates.append({"id": f"build_route_{index + 1}", "kind": "build_cargo_route", "route": route, "action": action})
         routes = self.observation.get("routes", []) if self.observation else []
         if routes:
-            candidates.insert(
-                0,
+            candidates.append(
                 {
                     "id": "wait_1_month",
                     "kind": "wait_months",
+                    "feasible": True,
                     "action": {"type": "wait_months", "months": 1, "label": "wait for route progress"},
-                },
+                }
             )
             for route in routes[:3]:
                 route_id = route.get("route_id") or route.get("id")
@@ -250,10 +265,160 @@ class OpenTTDFIRSEnv:
                         {
                             "id": f"add_vehicle_{route_id}",
                             "kind": "add_vehicles",
+                            "feasible": True,
                             "action": {"type": "add_vehicles", "route_id": route_id, "count": 1},
                         }
                     )
+            self.candidate_planning_summary = {
+                "mode": "route_management",
+                "settings": self._candidate_planning_settings(),
+                "candidate_routes_available": 0,
+                "candidate_routes_considered": 0,
+                "plan_attempts": 0,
+                "proven_feasible": len(candidates),
+                "proven_infeasible": 0,
+                "unknown": 0,
+                "stop_reason": "existing_routes",
+            }
+            self._candidate_cache_key = cache_key
+            self._candidate_cache = [dict(item) for item in candidates]
+            return candidates
+
+        candidate_routes = self.session.candidate_routes()
+        considered_routes = candidate_routes[: self.candidate_route_consider_limit]
+        planned_count = 0
+        feasible_count = 0
+        proven_infeasible_count = 0
+        unknown_count = 0
+        stop_reason = "candidate_routes_exhausted"
+        for index, route in enumerate(considered_routes):
+            action = {
+                "type": "build_cargo_route",
+                "source_id": route["source_id"],
+                "destination_id": route["destination_id"],
+                "cargo_id": route["cargo_id"],
+                "vehicles": int(getattr(self.run_config, "vehicles_per_route", 5)),
+                "physical": True,
+                "max_path_tiles": 256,
+                "station_candidate_limit": 8,
+                "allow_virtual": False,
+                "preview_roads": False,
+                "label": f"candidate_route_{index + 1}",
+            }
+            if self.candidate_stop_after_feasible and feasible_count >= self.candidate_stop_after_feasible:
+                plan = self._unknown_candidate_plan(action, "sufficient_feasible_candidates")
+            elif planned_count >= self.candidate_plan_attempt_limit:
+                plan = self._unknown_candidate_plan(action, "plan_attempt_limit")
+            else:
+                plan = self._plan_candidate_action(action)
+                planned_count += 1
+            feasibility = self._candidate_feasibility(plan)
+            feasible = feasibility == "proven_feasible"
+            if feasible:
+                feasible_count += 1
+            elif feasibility == "proven_infeasible":
+                proven_infeasible_count += 1
+            else:
+                unknown_count += 1
+            candidates.append(
+                {
+                    "id": f"build_route_{index + 1}",
+                    "kind": "build_cargo_route",
+                    "route": route,
+                    "action": action,
+                    "feasible": feasible,
+                    "feasibility": feasibility,
+                    "plan": plan,
+                    "diagnostics": [] if feasible else [str(plan.get("error") or feasibility)],
+                }
+            )
+        if self.candidate_stop_after_feasible and feasible_count >= self.candidate_stop_after_feasible:
+            stop_reason = "sufficient_feasible_candidates"
+        elif planned_count >= self.candidate_plan_attempt_limit and len(considered_routes) < len(candidate_routes):
+            stop_reason = "plan_attempt_limit"
+        candidates.sort(
+            key=lambda item: (
+                0 if item.get("feasible", True) else 1,
+                0 if item.get("feasibility") == "proven_infeasible" else 1,
+                int((item.get("plan") or {}).get("path_tiles", 999999) or 999999),
+                -float((item.get("route") or {}).get("production", 0) or 0),
+                int((item.get("route") or {}).get("distance", 999999) or 999999),
+                int((item.get("route") or {}).get("source_id", 999999) or 999999),
+                int((item.get("route") or {}).get("destination_id", 999999) or 999999),
+            )
+        )
+        self.candidate_planning_summary = {
+            "mode": "route_building",
+            "settings": self._candidate_planning_settings(),
+            "candidate_routes_available": len(candidate_routes),
+            "candidate_routes_considered": len(considered_routes),
+            "plan_attempts": planned_count,
+            "proven_feasible": feasible_count,
+            "proven_infeasible": proven_infeasible_count,
+            "unknown": unknown_count,
+            "stop_reason": stop_reason,
+        }
+        self._candidate_cache_key = cache_key
+        self._candidate_cache = [dict(item) for item in candidates]
         return candidates
+
+    def _candidate_cache_fingerprint(self) -> tuple[Any, ...]:
+        routes = self.observation.get("routes", []) if self.observation else []
+        route_state = tuple(
+            (
+                route.get("route_id"),
+                route.get("source_id"),
+                route.get("destination_id"),
+                route.get("cargo_id"),
+                route.get("delivered"),
+                route.get("vehicles"),
+            )
+            for route in routes
+        )
+        return (self.observation.get("tick") if self.observation else None, route_state)
+
+    def _plan_candidate_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        if self.session is None:
+            return {"feasible": False, "feasibility": "unknown_environment_not_ready", "error": "environment_not_ready"}
+        try:
+            plan = self.session.plan_cargo_route_action(action, timeout=self.candidate_plan_timeout)
+        except Exception as exc:
+            return {
+                "feasible": False,
+                "feasibility": "unknown_plan_timeout_or_error",
+                "error": "route_plan_timeout_or_error",
+                "detail": str(exc),
+            }
+        plan = dict(plan)
+        plan["feasibility"] = self._candidate_feasibility(plan)
+        return plan
+
+    def _unknown_candidate_plan(self, action: dict[str, Any], reason: str) -> dict[str, Any]:
+        return {
+            "action_type": "plan_cargo_route",
+            "cargo_id": action.get("cargo_id"),
+            "destination_id": action.get("destination_id"),
+            "source_id": action.get("source_id"),
+            "feasible": False,
+            "feasibility": f"unknown_{reason}",
+            "error": f"candidate_planning_{reason}",
+        }
+
+    def _candidate_feasibility(self, plan: dict[str, Any]) -> str:
+        explicit = str(plan.get("feasibility") or "")
+        if explicit:
+            return explicit
+        if bool(plan.get("feasible")) and not plan.get("error"):
+            return "proven_feasible"
+        return "proven_infeasible"
+
+    def _candidate_planning_settings(self) -> dict[str, Any]:
+        return {
+            "route_consider_limit": self.candidate_route_consider_limit,
+            "plan_attempt_limit": self.candidate_plan_attempt_limit,
+            "stop_after_feasible": self.candidate_stop_after_feasible,
+            "plan_timeout_seconds": self.candidate_plan_timeout,
+        }
 
     def close(self) -> None:
         if self.admin is not None:
@@ -328,6 +493,7 @@ class OpenTTDFIRSEnv:
     def _observation_with_candidates(self, observation: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(observation)
         enriched["candidate_actions"] = self.candidate_actions()
+        enriched["candidate_planning"] = dict(self.candidate_planning_summary)
         enriched["task"] = self.workbook_meta.get("benchmark_task", {})
         enriched["workbook"] = {
             "scenario": self.workbook_meta.get("fields", {}),
@@ -350,28 +516,51 @@ class OpenTTDFIRSEnv:
             "snapshot": snapshot,
             "run_dir": str(self.run_dir) if self.run_dir else None,
             "deterministic": self.deterministic,
+            "candidate_planning": dict(self.candidate_planning_summary),
             "task": self.workbook_meta.get("benchmark_task", {}),
         }
 
     def _build_runtime_lock(self) -> dict[str, Any]:
         company_ai_dir = self.installed.get("company_ai_dir") if self.installed else None
         gamescript_dir = self.installed.get("gamescript_dir") if self.installed else None
+        bridge_root = Path(__file__).resolve().parents[3] / "openttd_bridge"
+        benchmark_file = Path(self.benchmark_file) if self.benchmark_file else _default_benchmark_file()
         return {
-            "schema": "openttd-le-runtime-lock-v1",
+            "schema": "openttd-le-runtime-lock-v2",
             "openttd_le_version": __version__,
+            "python_version": sys.version.split()[0],
             "openttd_executable": self.executable_path,
             "openttd_executable_sha256": _file_sha256(Path(self.executable_path)) if self.executable_path else None,
+            "opengfx_baseset": str(self.opengfx_path) if self.opengfx_path else None,
+            "opengfx_baseset_sha256": _file_sha256(self.opengfx_path),
             "firs_newgrf": str(self.install.newgrf_path) if self.install else None,
             "firs_newgrf_sha256": _file_sha256(self.install.newgrf_path) if self.install else None,
+            "firs_version": _firs_version_from_path(self.install.newgrf_path) if self.install else None,
+            "workbook": str(self.workbook_path),
+            "workbook_sha256": _file_sha256(self.workbook_path),
+            "benchmark_file": str(benchmark_file) if benchmark_file else None,
+            "benchmark_file_sha256": _file_sha256(benchmark_file) if benchmark_file else None,
             "cfg": str(self.cfg_path) if self.cfg_path else None,
             "cfg_sha256": _file_sha256(self.cfg_path),
             "cfg_effective_sha256": _normalized_cfg_sha256(self.cfg_path),
+            "server_command": list(self.server_cmd),
+            "server_command_effective": _normalized_server_command(self.server_cmd),
+            "process_cwd": self.process_cwd,
             "company_ai_sha256": _directory_sha256(Path(company_ai_dir)) if company_ai_dir else None,
             "gamescript_sha256": _directory_sha256(Path(gamescript_dir)) if gamescript_dir else None,
+            "company_ai_source_sha256": _directory_sha256(bridge_root / "OpenTTDLECompany"),
+            "gamescript_source_sha256": _directory_sha256(bridge_root / "OpenTTDLEGameScript"),
             "seed": getattr(self.run_config, "seed", None),
             "economy": getattr(self.run_config, "economy", None),
             "map_x": getattr(self.run_config, "map_x", None),
             "map_y": getattr(self.run_config, "map_y", None),
+            "landscape": getattr(self.run_config, "landscape", None),
+            "starting_year": getattr(self.run_config, "starting_year", None),
+            "target_chain": list(getattr(self.run_config, "target_chain", []) or []),
+            "task_id": self.task.id if self.task else self.task_id,
+            "gym_env_id": "OpenTTD-FIRS-Deterministic-v0" if self.deterministic else "OpenTTD-FIRS-Lab-v0",
+            "deterministic": self.deterministic,
+            "candidate_planning_settings": self._candidate_planning_settings(),
         }
 
 
@@ -443,3 +632,30 @@ def _normalized_cfg_sha256(path: Path | None) -> str | None:
         else:
             lines.append(line)
     return hashlib.sha256(("\n".join(lines) + "\n").encode("ascii")).hexdigest()
+
+
+def _normalized_server_command(command: list[str]) -> list[str]:
+    normalized: list[str] = []
+    skip_cfg_path = False
+    for index, item in enumerate(command):
+        if index == 0:
+            normalized.append("<openttd>")
+            continue
+        if skip_cfg_path:
+            normalized.append("<cfg>")
+            skip_cfg_path = False
+            continue
+        if item == "-c":
+            normalized.append(item)
+            skip_cfg_path = True
+            continue
+        if item.startswith("0.0.0.0:"):
+            normalized.append("0.0.0.0:<ephemeral>")
+            continue
+        normalized.append(item)
+    return normalized
+
+
+def _default_benchmark_file() -> Path | None:
+    candidate = Path(__file__).resolve().parents[3] / "scenarios" / "firs_benchmarks.json"
+    return candidate if candidate.exists() else None

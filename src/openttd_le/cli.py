@@ -144,6 +144,27 @@ def main(argv: list[str] | None = None) -> int:
     determinism_parser.add_argument("--repeats", type=int, default=3)
     determinism_parser.add_argument("--max-candidates", type=int, default=24)
     determinism_parser.add_argument("--max-steps", type=int, default=3)
+    determinism_parser.add_argument(
+        "--trace-mode",
+        choices=("strict", "semantic"),
+        default="strict",
+        help="Strict compares the public trace except runtime artifacts; semantic uses the older relaxed normalizer.",
+    )
+    determinism_parser.add_argument(
+        "--no-fixed-action-script",
+        action="store_true",
+        help="Recompute baseline actions on every repeat instead of replaying the first repeat's action indices.",
+    )
+    determinism_parser.add_argument(
+        "--no-runtime-lock-compare",
+        action="store_true",
+        help="Do not fail when comparable runtime/input fingerprints differ.",
+    )
+    determinism_parser.add_argument(
+        "--progress-jsonl",
+        default=None,
+        help="Append repeat and combination progress events to this JSONL file.",
+    )
 
     benchmark_gym_parser = subparsers.add_parser(
         "benchmark-gym",
@@ -223,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     report_parser.add_argument("--training-report", default=None)
     report_parser.add_argument("--route-builder-report", default=None)
     report_parser.add_argument("--out", default="runs_report")
-    report_parser.add_argument("--title", default="OpenTTD-LE FIRS Benchmark Report")
+    report_parser.add_argument("--title", default="TycoonLE OpenTTD FIRS Benchmark Report")
 
     smoke_parser = subparsers.add_parser("smoke-openttd", help="Check real OpenTTD executable integration.")
     smoke_parser.add_argument("--executable", default=None)

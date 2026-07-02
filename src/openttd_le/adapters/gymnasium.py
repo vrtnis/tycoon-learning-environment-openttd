@@ -31,12 +31,12 @@ FIRS_DETERMINISTIC_GYM_ID = "OpenTTD-FIRS-Deterministic-v0"
 TOY_GYM_ID = "OpenTTDLE-Toy-v0"
 
 FIRS_OBSERVATION_SPEC = {
-    "tick": "float32 scalar, current OpenTTD game tick",
-    "bank_balance": "float32 scalar, current company bank balance",
-    "route_count": "float32 scalar, registered physical cargo routes",
-    "delivered_routes": "float32 scalar, routes with at least one delivery",
-    "cargo_delivered": "float32 scalar, total delivered cargo units across routes",
-    "route_profit": "float32 scalar, sum of route vehicle profit",
+    "tick": "float32[1], current OpenTTD game tick",
+    "bank_balance": "float32[1], current company bank balance",
+    "route_count": "float32[1], registered physical cargo routes",
+    "delivered_routes": "float32[1], routes with at least one delivery",
+    "cargo_delivered": "float32[1], total delivered cargo units across routes",
+    "route_profit": "float32[1], sum of route vehicle profit",
     "candidate_production": "float32[max_candidates], production estimate for each candidate route action",
     "action_mask": "int8[max_candidates], 1 when the candidate index is valid for this state",
 }
@@ -45,7 +45,7 @@ FIRS_OBSERVATION_SPEC = {
 class OpenTTDLEGymEnv(gym.Env if gym is not None else object):  # type: ignore[misc]
     """Gymnasium adapter for choosing an index into the current action frontier.
 
-    The native OpenTTD-LE API remains the source of truth. This adapter keeps
+    The native TycoonLE OpenTTD API remains the source of truth. This adapter keeps
     standard RL loops simple by exposing `Discrete(max_candidates)` actions and
     placing the rich candidate frontier in `info["candidate_actions"]`.
     """
@@ -243,12 +243,12 @@ class OpenTTDFIRSGymEnv(gym.Env if gym is not None else object):  # type: ignore
         self.action_space = spaces.Discrete(max_candidates)
         self.observation_space = spaces.Dict(
             {
-                "tick": spaces.Box(low=0.0, high=1_000_000_000.0, shape=(), dtype=np.float32),
-                "bank_balance": spaces.Box(low=-1_000_000_000.0, high=1_000_000_000.0, shape=(), dtype=np.float32),
-                "route_count": spaces.Box(low=0.0, high=10_000.0, shape=(), dtype=np.float32),
-                "delivered_routes": spaces.Box(low=0.0, high=10_000.0, shape=(), dtype=np.float32),
-                "cargo_delivered": spaces.Box(low=0.0, high=1_000_000_000.0, shape=(), dtype=np.float32),
-                "route_profit": spaces.Box(low=-1_000_000_000.0, high=1_000_000_000.0, shape=(), dtype=np.float32),
+                "tick": spaces.Box(low=0.0, high=1_000_000_000.0, shape=(1,), dtype=np.float32),
+                "bank_balance": spaces.Box(low=-1_000_000_000.0, high=1_000_000_000.0, shape=(1,), dtype=np.float32),
+                "route_count": spaces.Box(low=0.0, high=10_000.0, shape=(1,), dtype=np.float32),
+                "delivered_routes": spaces.Box(low=0.0, high=10_000.0, shape=(1,), dtype=np.float32),
+                "cargo_delivered": spaces.Box(low=0.0, high=1_000_000_000.0, shape=(1,), dtype=np.float32),
+                "route_profit": spaces.Box(low=-1_000_000_000.0, high=1_000_000_000.0, shape=(1,), dtype=np.float32),
                 "candidate_production": spaces.Box(
                     low=0.0,
                     high=1_000_000_000.0,
@@ -284,6 +284,8 @@ class OpenTTDFIRSGymEnv(gym.Env if gym is not None else object):  # type: ignore
         candidates = self._last_candidates
         action_index = int(action)
         invalid_action = action_index < 0 or action_index >= min(len(candidates), self.max_candidates)
+        if not invalid_action and not bool(candidates[action_index].get("feasible", True)):
+            invalid_action = True
         if invalid_action:
             selected = {"type": "wait_months", "months": 1, "label": "invalid candidate index no-op"}
         else:
@@ -346,12 +348,12 @@ class OpenTTDFIRSGymEnv(gym.Env if gym is not None else object):  # type: ignore
             bank_balance = _quantize_money(bank_balance)
             route_profit_value = _quantize_money(route_profit_value)
         return {
-            "tick": np.array(float(tick or 0), dtype=np.float32),
-            "bank_balance": np.array(bank_balance, dtype=np.float32),
-            "route_count": np.array(float(len(routes)), dtype=np.float32),
-            "delivered_routes": np.array(float(delivered_routes), dtype=np.float32),
-            "cargo_delivered": np.array(float(cargo_delivered), dtype=np.float32),
-            "route_profit": np.array(route_profit_value, dtype=np.float32),
+            "tick": np.array([float(tick or 0)], dtype=np.float32),
+            "bank_balance": np.array([bank_balance], dtype=np.float32),
+            "route_count": np.array([float(len(routes))], dtype=np.float32),
+            "delivered_routes": np.array([float(delivered_routes)], dtype=np.float32),
+            "cargo_delivered": np.array([float(cargo_delivered)], dtype=np.float32),
+            "route_profit": np.array([route_profit_value], dtype=np.float32),
             "candidate_production": candidate_production,
             "action_mask": _mask(candidates, self.max_candidates),
         }
@@ -442,7 +444,7 @@ def _mask(candidates: list[dict[str, Any]], max_candidates: int) -> Any:
         raise RuntimeError("Gymnasium adapter requires numpy.")
     mask = np.zeros((max_candidates,), dtype="int8")
     for index, candidate in enumerate(candidates[:max_candidates]):
-        if candidate.get("action"):
+        if candidate.get("action") and bool(candidate.get("feasible", True)):
             mask[index] = 1
     return mask
 
