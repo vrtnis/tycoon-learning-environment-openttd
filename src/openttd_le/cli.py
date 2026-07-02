@@ -41,8 +41,8 @@ from openttd_le.workbooks.template import create_firs_ops_workbook
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="openttd-le")
-    parser.add_argument("--version", action="version", version=f"openttd-le {__version__}")
+    parser = argparse.ArgumentParser(prog="tycoonle-openttd")
+    parser.add_argument("--version", action="version", version=f"tycoonle-openttd {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list-scenarios", help="List bundled scenarios.")

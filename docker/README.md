@@ -1,15 +1,15 @@
 # Docker
 
-Build the benchmark scaffold:
+Build the TycoonLE OpenTTD image:
 
 ```bash
-docker build -t openttd-le:0.1 .
+docker build -t tycoonle-openttd:0.1 .
 ```
 
 Run a baseline:
 
 ```bash
-docker run --rm -v "%cd%/runs:/app/runs" openttd-le:0.1 \
+docker run --rm -v "%cd%/runs:/app/runs" tycoonle-openttd:0.1 \
   eval --agent greedy --scenario coal_easy_001 --out runs
 ```
 

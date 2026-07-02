@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openttd-le"
+name = "tycoon-learning-environment-openttd"
 version = "0.4.4"
-description = "OpenTTD Learning Environment scaffold for logistics-planning agents."
+description = "Real OpenTTD/FIRS backend for TycoonLE sim-to-real evaluation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "OpenTTD-LE contributors" }]
+authors = [{ name = "TycoonLE contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
@@ -19,7 +19,13 @@ parquet = ["pandas>=2.0", "pyarrow>=15.0"]
 rl = ["gymnasium>=1.0", "stable-baselines3>=2.3", "sb3-contrib>=2.3"]
 
 [project.scripts]
+tycoonle-openttd = "openttd_le.cli:main"
 openttd-le = "openttd_le.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vrtnis/tycoon-learning-environment-openttd"
+Repository = "https://github.com/vrtnis/tycoon-learning-environment-openttd"
+"TycoonLE JAX simulator" = "https://github.com/vrtnis/tycoon-learning-environment"
 
 [project.entry-points."gymnasium.envs"]
 openttd_le = "openttd_le.adapters.gymnasium:register_envs"
