@@ -14,8 +14,8 @@ and telemetry.
 
 Current status:
 
-- `openttd-le smoke-openttd` resolves the installed executable.
-- `openttd-le smoke-openttd --launch` starts a dedicated OpenTTD process in an
+- `tycoonle-openttd smoke-openttd` resolves the installed executable.
+- `tycoonle-openttd smoke-openttd --launch` starts a dedicated OpenTTD process in an
   isolated temporary run directory.
 - `--backend openttd` does not yet execute gameplay macro-actions.
 - `openttd_bridge/OpenTTDLEBridge` contains the initial NoAI bridge skeleton.

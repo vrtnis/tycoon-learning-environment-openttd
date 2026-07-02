@@ -11,7 +11,7 @@ from openttd_le.core.types import EnvError, GameState, Metrics, Node, Route, Sce
 
 
 class ToyLogisticsBackend(Backend):
-    """A deterministic logistics simulator for exercising OpenTTD-LE contracts.
+    """A deterministic logistics simulator for exercising TycoonLE OpenTTD contracts.
 
     This backend is intentionally small. It lets us build the benchmark, agents,
     scorecards, and artifacts before the real OpenTTD bridge is ready.

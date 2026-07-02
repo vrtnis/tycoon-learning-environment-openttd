@@ -155,7 +155,7 @@ def ensure_opengfx() -> Path:
         return existing[-1]
 
     tmp_zip = baseset_dir / "opengfx-8.0-all.zip"
-    request = urllib.request.Request(OPENGFX_URL, headers={"User-Agent": "OpenTTD-LE/0.1"})
+    request = urllib.request.Request(OPENGFX_URL, headers={"User-Agent": "TycoonLE-OpenTTD/0.1"})
     with urllib.request.urlopen(request, timeout=120) as response, tmp_zip.open("wb") as handle:
         shutil.copyfileobj(response, handle)
     with zipfile.ZipFile(tmp_zip) as archive:
@@ -255,7 +255,7 @@ quantity_sea_lakes = 0
 vehicle_breakdowns = 0
 
 [network]
-server_name = OpenTTD-LE Watch
+server_name = TycoonLE OpenTTD Watch
 server_advertise = false
 max_companies = 15
 

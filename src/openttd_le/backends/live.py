@@ -53,7 +53,7 @@ class AdminClient:
             try:
                 self.sock = socket.create_connection((self.host, self.port), timeout=3.0)
                 self.sock.settimeout(1.0)
-                self._send(0, _string(self.password) + _string("openttd-le") + _string("0.1"))
+                self._send(0, _string(self.password) + _string("tycoonle-openttd") + _string("0.1"))
                 self._wait_for_types({103, 104}, timeout=10.0)
                 self._send(2, struct.pack("<HH", 9, 1 << 6))
                 return
@@ -478,7 +478,7 @@ def launch_gpt_live(
     cfg_text = _live_config(seed, game_port, admin_port)
     cfg_path.write_text(cfg_text, encoding="ascii")
     client_cfg_path = run_dir / "openttd-viewer.cfg"
-    client_cfg_path.write_text(_with_client_name(cfg_text, f"OpenTTD-LE Viewer {game_port}"), encoding="ascii")
+    client_cfg_path.write_text(_with_client_name(cfg_text, f"TycoonLE OpenTTD Viewer {game_port}"), encoding="ascii")
 
     server_cmd = [
         str(exe),
@@ -604,7 +604,7 @@ def launch_coal_objective(
     cfg_text = _live_config(seed, game_port, admin_port)
     cfg_path.write_text(cfg_text, encoding="ascii")
     client_cfg_path = run_dir / "openttd-viewer.cfg"
-    client_cfg_path.write_text(_with_client_name(cfg_text, f"OpenTTD-LE Viewer {game_port}"), encoding="ascii")
+    client_cfg_path.write_text(_with_client_name(cfg_text, f"TycoonLE OpenTTD Viewer {game_port}"), encoding="ascii")
 
     server_cmd = [
         str(exe),
@@ -760,12 +760,12 @@ def launch_firs_live(
     )
     artifact_cfg_path = run_dir / "openttd.cfg"
     artifact_client_cfg_path = run_dir / "openttd-viewer.cfg"
-    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    cfg_path = (local_user_dir / f"tycoonle-openttd-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
     client_cfg_path = (
-        local_user_dir / f"openttd-le-{run_dir.name}-viewer.cfg" if local_user_dir else artifact_client_cfg_path
+        local_user_dir / f"tycoonle-openttd-{run_dir.name}-viewer.cfg" if local_user_dir else artifact_client_cfg_path
     )
     cfg_path.write_text(cfg_text, encoding="ascii")
-    client_cfg_text = _with_client_name(cfg_text, f"OpenTTD-LE FIRS Viewer {game_port}")
+    client_cfg_text = _with_client_name(cfg_text, f"TycoonLE OpenTTD FIRS Viewer {game_port}")
     client_cfg_path.write_text(client_cfg_text, encoding="ascii")
     if cfg_path != artifact_cfg_path:
         artifact_cfg_path.write_text(cfg_text, encoding="ascii")
@@ -1017,12 +1017,12 @@ def launch_firs_replay(
     )
     artifact_cfg_path = run_dir / "openttd.cfg"
     artifact_client_cfg_path = run_dir / "openttd-viewer.cfg"
-    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    cfg_path = (local_user_dir / f"tycoonle-openttd-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
     client_cfg_path = (
-        local_user_dir / f"openttd-le-{run_dir.name}-viewer.cfg" if local_user_dir else artifact_client_cfg_path
+        local_user_dir / f"tycoonle-openttd-{run_dir.name}-viewer.cfg" if local_user_dir else artifact_client_cfg_path
     )
     cfg_path.write_text(cfg_text, encoding="ascii")
-    client_cfg_text = _with_client_name(cfg_text, f"OpenTTD-LE Replay Viewer {game_port}")
+    client_cfg_text = _with_client_name(cfg_text, f"TycoonLE OpenTTD Replay Viewer {game_port}")
     client_cfg_path.write_text(client_cfg_text, encoding="ascii")
     if cfg_path != artifact_cfg_path:
         artifact_cfg_path.write_text(cfg_text, encoding="ascii")
@@ -1226,7 +1226,7 @@ def launch_firs_research(
         admin_password=ADMIN_PASSWORD,
     )
     artifact_cfg_path = run_dir / "openttd.cfg"
-    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    cfg_path = (local_user_dir / f"tycoonle-openttd-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
     cfg_path.write_text(cfg_text, encoding="ascii")
     if cfg_path != artifact_cfg_path:
         artifact_cfg_path.write_text(cfg_text, encoding="ascii")
@@ -1500,7 +1500,7 @@ def launch_route_builder_benchmark(
         admin_password=ADMIN_PASSWORD,
     )
     artifact_cfg_path = run_dir / "openttd.cfg"
-    cfg_path = (local_user_dir / f"openttd-le-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
+    cfg_path = (local_user_dir / f"tycoonle-openttd-{run_dir.name}.cfg") if local_user_dir else artifact_cfg_path
     cfg_path.write_text(cfg_text, encoding="ascii")
     if cfg_path != artifact_cfg_path:
         artifact_cfg_path.write_text(cfg_text, encoding="ascii")
@@ -2578,8 +2578,8 @@ quantity_sea_lakes = 0
 vehicle_breakdowns = 0
 
 [network]
-server_name = OpenTTD-LE Live GPT
-client_name = OpenTTD-LE Server
+server_name = TycoonLE OpenTTD Live
+client_name = TycoonLE OpenTTD Server
 server_port = {game_port}
 server_admin_port = {admin_port}
 admin_password = {ADMIN_PASSWORD}

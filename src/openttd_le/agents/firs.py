@@ -41,7 +41,7 @@ class OpenAIFIRSMacroAgent(Agent):
                 {
                     "role": "system",
                     "content": (
-                        "You are a baseline agent for OpenTTD-LE's real OpenTTD/FIRS environment. "
+                        "You are a baseline agent for TycoonLE OpenTTD's real OpenTTD/FIRS environment. "
                         "Return exactly one compact JSON macro-action and no prose. The environment, "
                         "not you, executes the action and returns reward/termination. Prefer actions "
                         "listed in candidate_actions. Use only IDs present in the observation. "

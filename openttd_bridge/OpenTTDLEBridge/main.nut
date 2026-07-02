@@ -9,7 +9,7 @@ class OpenTTDLEBridge extends AIController {
 function OpenTTDLEBridge::Start()
 {
     this.Sleep(1);
-    AICompany.SetName("GPT-5.5 Speedrun");
+    AICompany.SetName("TycoonLE OpenTTD Speedrun");
     AILog.Info("OpenTTDLEBridge speedrun started.");
 
     local pair = this.ChooseTownPair();

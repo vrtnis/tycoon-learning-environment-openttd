@@ -12,7 +12,7 @@ def write_benchmark_report(
     training_report: dict[str, Any] | Path | str | None = None,
     route_builder_report: dict[str, Any] | Path | str | None = None,
     output_dir: Path | str,
-    title: str = "OpenTTD-LE FIRS Benchmark Report",
+    title: str = "TycoonLE OpenTTD FIRS Benchmark Report",
 ) -> dict[str, Any]:
     """Write researcher-facing Markdown, CSV tables, and simple SVG curves."""
 

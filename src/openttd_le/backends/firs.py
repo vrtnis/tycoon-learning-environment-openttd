@@ -232,8 +232,8 @@ quantity_sea_lakes = 0
 vehicle_breakdowns = 0
 
 [network]
-server_name = OpenTTD-LE FIRS GPT
-client_name = OpenTTD-LE FIRS Server
+server_name = TycoonLE OpenTTD FIRS
+client_name = TycoonLE OpenTTD FIRS Server
 server_port = {game_port}
 server_admin_port = {admin_port}
 admin_password = {admin_password}

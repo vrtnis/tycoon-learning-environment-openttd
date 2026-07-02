@@ -20,9 +20,9 @@ class LiveBackendTests(unittest.TestCase):
     def test_live_config_supports_local_viewer_client(self) -> None:
         config = _live_config(seed=1, game_port=3979, admin_port=3977)
         self.assertIn("server_game_type = local", config)
-        self.assertIn("client_name = OpenTTD-LE Server", config)
-        viewer_config = _with_client_name(config, "OpenTTD-LE Viewer 3979")
-        self.assertIn("client_name = OpenTTD-LE Viewer 3979", viewer_config)
+        self.assertIn("client_name = TycoonLE OpenTTD Server", config)
+        viewer_config = _with_client_name(config, "TycoonLE OpenTTD Viewer 3979")
+        self.assertIn("client_name = TycoonLE OpenTTD Viewer 3979", viewer_config)
         self.assertIn("OpenTTDLEGameScript =", config)
 
     def test_parse_json_accepts_fenced_model_action(self) -> None:

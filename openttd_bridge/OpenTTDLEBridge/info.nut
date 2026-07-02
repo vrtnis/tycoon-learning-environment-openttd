@@ -1,8 +1,8 @@
 class OpenTTDLEBridgeInfo extends AIInfo {
-    function GetAuthor() { return "OpenTTD-LE"; }
+    function GetAuthor() { return "TycoonLE OpenTTD"; }
     function GetName() { return "OpenTTDLEBridge"; }
     function GetShortName() { return "OTLE"; }
-    function GetDescription() { return "Bridge AI for OpenTTD-LE macro-action experiments."; }
+    function GetDescription() { return "Bridge AI for TycoonLE OpenTTD macro-action experiments."; }
     function GetVersion() { return 1; }
     function GetDate() { return "2026-05-14"; }
     function CreateInstance() { return "OpenTTDLEBridge"; }

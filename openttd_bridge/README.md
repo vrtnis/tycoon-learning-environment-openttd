@@ -23,7 +23,7 @@ integration. The `watch-gpt` command installs this bridge and opens a visible
 game:
 
 ```bash
-openttd-le watch-gpt
+tycoonle-openttd watch-gpt
 ```
 
 The next bridge milestone is to make this AI accept externally supplied

@@ -1,5 +1,5 @@
 class OpenTTDLEGameScriptInfo extends GSInfo {
-    function GetAuthor() { return "OpenTTD-LE"; }
+    function GetAuthor() { return "TycoonLE OpenTTD"; }
     function GetName() { return "OpenTTDLEGameScript"; }
     function GetShortName() { return "OTLG"; }
     function GetDescription() { return "Admin-port bridge for live GPT control of OpenTTD."; }

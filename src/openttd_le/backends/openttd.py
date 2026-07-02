@@ -42,7 +42,7 @@ class OpenTTDBackend(Backend):
             )
         self.close()
         self.scenario = scenario
-        self.run_dir = tempfile.TemporaryDirectory(prefix=f"openttd-le-{scenario.id}-")
+        self.run_dir = tempfile.TemporaryDirectory(prefix=f"tycoonle-openttd-{scenario.id}-")
         cfg_path = os.path.join(self.run_dir.name, "openttd.cfg")
         with open(cfg_path, "w", encoding="utf-8") as handle:
             handle.write(_config_text(seed or 0))
@@ -160,7 +160,7 @@ def _config_text(seed: int) -> str:
 display_opt = SHOW_TOWN_NAMES|SHOW_STATION_NAMES|SHOW_SIGNS|FULL_ANIMATION|FULL_DETAIL|WAYPOINTS
 
 [network]
-server_name = OpenTTD-LE
+server_name = TycoonLE OpenTTD
 server_port = 3979
 server_advertise = false
 max_clients = 1

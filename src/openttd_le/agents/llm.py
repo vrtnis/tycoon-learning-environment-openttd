@@ -9,7 +9,7 @@ from typing import Any
 from .base import Agent
 
 
-SYSTEM_PROMPT = """You are playing OpenTTD-LE, a transport logistics benchmark.
+SYSTEM_PROMPT = """You are playing TycoonLE OpenTTD, a transport logistics benchmark.
 Choose exactly one legal macro-action as compact JSON and no prose.
 
 Allowed actions:
@@ -78,8 +78,8 @@ class OpenRouterAgent(Agent):
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/openttd-le/openttd-le",
-                "X-Title": "OpenTTD-LE",
+                "HTTP-Referer": "https://github.com/vrtnis/tycoon-learning-environment-openttd",
+                "X-Title": "TycoonLE OpenTTD",
             },
             method="POST",
         )

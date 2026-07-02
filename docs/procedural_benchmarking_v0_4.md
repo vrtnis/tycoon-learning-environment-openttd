@@ -1,4 +1,4 @@
-# OpenTTD-LE v0.4 Procedural Benchmarking
+# TycoonLE OpenTTD v0.4 Procedural Benchmarking
 
 The v0.4 layer reduces benchmark saturation risk by adding generated scenario
 families with deterministic split seeds. The native environment contract is
@@ -36,13 +36,13 @@ proc_dev_chain_001
 List generated scenarios:
 
 ```bash
-openttd-le list-procedural-scenarios --split dev --count-per-family 3
+tycoonle-openttd list-procedural-scenarios --split dev --count-per-family 3
 ```
 
 Run the procedural benchmark:
 
 ```bash
-openttd-le benchmark-core \
+tycoonle-openttd benchmark-core \
   --suite procedural \
   --split dev \
   --agents random,greedy,candidate_rank,preview_rerank \
@@ -54,7 +54,7 @@ openttd-le benchmark-core \
 Use the held-out split for final reports:
 
 ```bash
-openttd-le benchmark-core \
+tycoonle-openttd benchmark-core \
   --suite procedural \
   --split test \
   --agents candidate_rank,preview_rerank \

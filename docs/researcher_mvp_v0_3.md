@@ -1,6 +1,6 @@
-# OpenTTD-LE v0.3 Researcher MVP
+# TycoonLE OpenTTD v0.3 Researcher MVP
 
-The v0.3 MVP keeps the native OpenTTD-LE environment as the source of truth and
+The v0.3 MVP keeps the native TycoonLE OpenTTD environment as the source of truth and
 adds compatibility layers for common research workflows.
 
 ## Native Core
@@ -22,7 +22,7 @@ dataset records carry explicit schema identifiers from
 ## Benchmark Suite
 
 ```bash
-openttd-le benchmark-core \
+tycoonle-openttd benchmark-core \
   --suite core \
   --agents random,greedy,candidate_rank,preview_rerank \
   --seeds 1,2,3 \
@@ -36,8 +36,8 @@ and mean invalid actions.
 ## Dataset Export
 
 ```bash
-openttd-le export-dataset --run runs_core --out dataset.jsonl
-openttd-le export-dataset --run runs_core --out dataset.parquet --format parquet
+tycoonle-openttd export-dataset --run runs_core --out dataset.jsonl
+tycoonle-openttd export-dataset --run runs_core --out dataset.parquet --format parquet
 ```
 
 JSONL has no optional dependencies. Parquet requires:

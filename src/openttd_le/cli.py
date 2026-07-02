@@ -444,6 +444,10 @@ def main(argv: list[str] | None = None) -> int:
                 repeats=args.repeats,
                 max_candidates=args.max_candidates,
                 max_steps=args.max_steps,
+                trace_mode=args.trace_mode,
+                fixed_action_script=not args.no_fixed_action_script,
+                compare_runtime_lock=not args.no_runtime_lock_compare,
+                progress_path=Path(args.progress_jsonl) if args.progress_jsonl else None,
             )
         )
         print(json.dumps(payload, indent=2))

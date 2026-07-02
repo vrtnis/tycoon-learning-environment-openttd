@@ -102,8 +102,8 @@ def _core_props() -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:creator>OpenTTD-LE</dc:creator>
-  <cp:lastModifiedBy>OpenTTD-LE</cp:lastModifiedBy>
+  <dc:creator>TycoonLE OpenTTD</dc:creator>
+  <cp:lastModifiedBy>TycoonLE OpenTTD</cp:lastModifiedBy>
   <dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>
   <dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>
 </cp:coreProperties>"""
@@ -113,7 +113,7 @@ def _app_props(sheets: list[Sheet]) -> str:
     titles = "".join(f"<vt:lpstr>{_xml(sheet.name)}</vt:lpstr>" for sheet in sheets)
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-  <Application>OpenTTD-LE</Application>
+  <Application>TycoonLE OpenTTD</Application>
   <DocSecurity>0</DocSecurity>
   <ScaleCrop>false</ScaleCrop>
   <HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>{len(sheets)}</vt:i4></vt:variant></vt:vector></HeadingPairs>

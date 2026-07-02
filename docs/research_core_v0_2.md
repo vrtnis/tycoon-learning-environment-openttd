@@ -1,4 +1,4 @@
-# OpenTTD-LE v0.2 Research Core
+# TycoonLE OpenTTD v0.2 Research Core
 
 The v0.2 research core separates the environment substrate from agent research.
 It keeps the simulator contract small while exposing enough structure for
@@ -28,7 +28,7 @@ Observations include `candidate_actions`. Each candidate has:
 
 ## Artifacts
 
-Every `openttd-le eval` run emits:
+Every `tycoonle-openttd eval` run emits:
 
 - `episode.jsonl`: joined before/action/after/reward rows
 - `candidate_actions.jsonl`: the action frontier available at each step
@@ -40,7 +40,7 @@ Every `openttd-le eval` run emits:
 Dataset export is local and file-based:
 
 ```bash
-openttd-le export-dataset --run runs --out dataset.jsonl
+tycoonle-openttd export-dataset --run runs --out dataset.jsonl
 ```
 
 The exported JSONL rows are intended for value-model training, action reranking,

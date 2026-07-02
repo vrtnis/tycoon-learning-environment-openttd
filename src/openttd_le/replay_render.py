@@ -127,7 +127,7 @@ def _render_index(frames: list[Path]) -> str:
     links = "\n".join(
         f'<li><a href="{path.name}">{path.name}</a><br><img src="{path.name}" width="720"></li>' for path in frames
     )
-    return f"<!doctype html><meta charset='utf-8'><title>OpenTTD-LE Replay</title><ol>{links}</ol>"
+    return f"<!doctype html><meta charset='utf-8'><title>TycoonLE OpenTTD Replay</title><ol>{links}</ol>"
 
 
 def _render_mp4_from_episode(rows: list[dict[str, Any]], output_path: Path, *, fps: int) -> Path | None:

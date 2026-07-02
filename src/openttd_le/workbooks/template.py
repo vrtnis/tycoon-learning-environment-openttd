@@ -100,7 +100,7 @@ def _plan_rows(config: FIRSRunConfig) -> list[list[Any]]:
 def _scorecard_rows() -> list[list[Any]]:
     return [
         ["Scorecard"],
-        ["Run summary is populated by openttd-le export-xlsx or play-firs-live."],
+        ["Run summary is populated by tycoonle-openttd export-xlsx or play-firs-live."],
         ["Metric", "Value", "Target", "Status"],
         ["First route delivered", "", 1, ""],
         ["Second route delivered", "", 1, ""],

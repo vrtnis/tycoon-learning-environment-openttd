@@ -1,13 +1,13 @@
-# OpenTTD-LE v0.1 Draft Report
+# TycoonLE OpenTTD v0.1 Draft Report
 
-OpenTTD-LE evaluates planning and LLM agents on transport-logistics tasks:
+TycoonLE OpenTTD evaluates planning and LLM agents on transport-logistics tasks:
 route selection, fleet expansion, debt control, and long-horizon network growth.
 
 ## Quickstart
 
 ```bash
 python -m pip install -e .
-openttd-le eval --agent greedy --scenario coal_easy_001
+tycoonle-openttd eval --agent greedy --scenario coal_easy_001
 ```
 
 ## Environment
@@ -70,7 +70,7 @@ bridge boundary is already represented by `Backend.reset()` and `Backend.apply()
 
 ## Differentiation
 
-Unlike prior tycoon RL work focused on amusement-park placement, OpenTTD-LE is
+Unlike prior tycoon RL work focused on amusement-park placement, TycoonLE OpenTTD is
 organized around transport-network logistics. Unlike FLE, which emphasizes
-factory automation, OpenTTD-LE emphasizes route economics, fleet operation,
+factory automation, TycoonLE OpenTTD emphasizes route economics, fleet operation,
 capital constraints, and network expansion.

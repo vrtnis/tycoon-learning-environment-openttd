@@ -7,7 +7,7 @@ from openttd_le.core.types import GameState, Scenario
 
 
 class Backend(ABC):
-    """Simulator backend contract for OpenTTD-LE."""
+    """Simulator backend contract for TycoonLE OpenTTD."""
 
     @abstractmethod
     def reset(self, scenario: Scenario, seed: int | None = None) -> GameState:
