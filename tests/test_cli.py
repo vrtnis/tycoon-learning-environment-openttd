@@ -355,6 +355,48 @@ class CliTests(unittest.TestCase):
             self.assertEqual(config.openttd_user_dir, Path(".openttd"))
             self.assertEqual(json.loads(stdout.getvalue())["aggregate"]["runs"], 1)
 
+    def test_eval_rl_model_cli_invokes_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = {
+                "artifacts": {
+                    "report": str(Path(tmp) / "rl_model_eval_report.json"),
+                    "step_trace": str(Path(tmp) / "step_trace.csv"),
+                },
+                "aggregate": {"episodes": 2, "mean_total_reward": 1.5},
+            }
+            with patch("openttd_le.cli.run_rl_model_eval", return_value=report) as runner:
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    code = main(
+                        [
+                            "eval-rl-model",
+                            "--model",
+                            "runs_rl_smoke/maskable_ppo/seed_1/maskable_ppo_model.zip",
+                            "--algorithm",
+                            "maskable_ppo",
+                            "--workbook",
+                            "scenario.xlsx",
+                            "--scenario",
+                            "lab_raw_to_processor_short",
+                            "--seeds",
+                            "2,3",
+                            "--openttd-user-dir",
+                            ".openttd",
+                            "--out",
+                            tmp,
+                            "--max-steps",
+                            "2",
+                        ]
+                    )
+
+            self.assertEqual(code, 0)
+            config = runner.call_args.args[0]
+            self.assertEqual(config.algorithm, "maskable_ppo")
+            self.assertEqual(config.seeds, (2, 3))
+            self.assertEqual(config.max_steps, 2)
+            self.assertEqual(config.openttd_user_dir, Path(".openttd"))
+            self.assertEqual(json.loads(stdout.getvalue())["aggregate"]["episodes"], 2)
+
     def test_build_benchmark_report_cli_invokes_writer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = {"report": str(Path(tmp) / "benchmark_report.md"), "tables": {}, "curves": {}}

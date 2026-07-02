@@ -32,7 +32,7 @@ from openttd_le.research.dataset import export_core_dataset
 from openttd_le.research.determinism import DeterminismConfig, run_determinism_check
 from openttd_le.research.gym_baselines import GYM_BASELINE_AGENTS, GymBaselineConfig, run_gym_baselines
 from openttd_le.research.reporting import write_benchmark_report
-from openttd_le.research.rl_training import RLTrainingConfig, run_rl_training
+from openttd_le.research.rl_training import RLModelEvalConfig, RLTrainingConfig, run_rl_model_eval, run_rl_training
 from openttd_le.research.validity import ValidityConfig, run_validity_pack
 from openttd_le.replay import export_replay
 from openttd_le.replay_render import render_core_replay
@@ -205,6 +205,23 @@ def main(argv: list[str] | None = None) -> int:
     train_rl_parser.add_argument("--total-timesteps", type=int, default=64)
     train_rl_parser.add_argument("--eval-interval", type=int, default=32)
     train_rl_parser.add_argument("--eval-episodes", type=int, default=1)
+
+    eval_rl_parser = subparsers.add_parser(
+        "eval-rl-model",
+        help="Run a saved RL model against a real OpenTTD/FIRS Gym task and write eval artifacts.",
+    )
+    eval_rl_parser.add_argument("--model", required=True, help="Path to a saved DQN or MaskablePPO .zip model.")
+    eval_rl_parser.add_argument("--algorithm", choices=["auto", "dqn", "maskable_ppo"], default="auto")
+    eval_rl_parser.add_argument("--workbook", default="scenario.xlsx")
+    eval_rl_parser.add_argument("--scenario", default="lab_raw_to_processor")
+    eval_rl_parser.add_argument("--executable", default=None)
+    eval_rl_parser.add_argument("--openttd-user-dir", default=None)
+    eval_rl_parser.add_argument("--out", default="runs_rl_eval")
+    eval_rl_parser.add_argument("--seeds", default="1")
+    eval_rl_parser.add_argument("--max-candidates", type=int, default=24)
+    eval_rl_parser.add_argument("--max-steps", type=int, default=8)
+    eval_rl_parser.add_argument("--eval-episodes", type=int, default=1)
+    eval_rl_parser.add_argument("--stochastic", action="store_true", help="Sample from the policy instead of using deterministic actions.")
 
     validity_parser = subparsers.add_parser(
         "benchmark-validity-pack",
@@ -511,6 +528,34 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "report": payload["report"],
+                    "artifacts": payload.get("artifacts", {}),
+                    "aggregate": payload["aggregate"],
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.command == "eval-rl-model":
+        payload = run_rl_model_eval(
+            RLModelEvalConfig(
+                model=Path(args.model),
+                workbook=Path(args.workbook),
+                task_id=args.scenario,
+                algorithm=args.algorithm,
+                seeds=tuple(int(item) for item in _split_csv(args.seeds)),
+                output_root=Path(args.out),
+                executable=args.executable,
+                openttd_user_dir=Path(args.openttd_user_dir) if args.openttd_user_dir else None,
+                max_candidates=args.max_candidates,
+                max_steps=args.max_steps,
+                eval_episodes=args.eval_episodes,
+                deterministic_policy=not args.stochastic,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "report": payload["artifacts"]["report"],
                     "artifacts": payload.get("artifacts", {}),
                     "aggregate": payload["aggregate"],
                 },
