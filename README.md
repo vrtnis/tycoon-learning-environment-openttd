@@ -9,6 +9,12 @@ Related repositories:
 - Fast JAX/Jumanji simulator: [vrtnis/tycoon-learning-environment](https://github.com/vrtnis/tycoon-learning-environment)
 - Real OpenTTD/FIRS backend: [vrtnis/tycoon-learning-environment-openttd](https://github.com/vrtnis/tycoon-learning-environment-openttd)
 
+## Example OpenTTD/FIRS State
+
+![FIRS industry state in real OpenTTD showing production, supply requirements, stations, vehicles, and transport percentage](docs/assets/tycoonle-openttd-firs-industry-example.png)
+
+A real OpenTTD/FIRS example state with industry windows, production, supply requirements, stations, vehicles, and transported cargo visible. TycoonLE OpenTTD uses this kind of live-game state to validate workbook scenarios, heuristic policies, and sim-to-real assumptions against actual OpenTTD/FIRS behavior.
+
 ## Install
 
 Use Python 3.11 or newer:

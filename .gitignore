@@ -19,6 +19,8 @@ runs_*/
 *.webm
 *.mkv
 *.png
+!docs/assets/
+!docs/assets/*.png
 *.sav
 *.log
 client-debug-*.txt
