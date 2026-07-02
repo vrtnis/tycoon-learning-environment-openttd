@@ -3,8 +3,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
+tools/
 build/
 dist/
 *.egg-info/
@@ -13,6 +16,8 @@ runs_smoke/
 runs_*/
 .openttd/
 *.mp4
+*.webm
+*.mkv
 *.png
 *.sav
 *.log
