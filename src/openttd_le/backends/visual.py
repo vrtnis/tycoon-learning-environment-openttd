@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sysconfig
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -105,7 +106,7 @@ def install_live_bridge() -> dict[str, str]:
 
 
 def _install_script_dir(name: str, kind: str, source_dir: Path | None = None) -> Path:
-    source = source_dir or _project_root() / "openttd_bridge" / name
+    source = source_dir or _bridge_source_root() / name
     if not source.exists():
         raise EnvError(f"Bridge source not found: {source}")
     target = _openttd_user_dir() / kind / name
@@ -122,6 +123,17 @@ def _install_script_dir(name: str, kind: str, source_dir: Path | None = None) ->
                     continue
                 raise
     return target
+
+
+def _bridge_source_root() -> Path:
+    candidates = [
+        _project_root() / "openttd_bridge",
+        Path(sysconfig.get_path("data")) / "openttd_bridge",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _same_file_bytes(source: Path, destination: Path) -> bool:

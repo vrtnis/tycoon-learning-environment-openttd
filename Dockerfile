@@ -5,7 +5,8 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY scenarios ./scenarios
 COPY docs ./docs
+COPY openttd_bridge ./openttd_bridge
 RUN pip install --no-cache-dir -e .
 
-ENTRYPOINT ["openttd-le"]
+ENTRYPOINT ["tycoonle-openttd"]
 CMD ["list-scenarios"]

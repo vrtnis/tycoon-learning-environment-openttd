@@ -35,3 +35,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 openttd_le = ["py.typed"]
+
+[tool.setuptools.data-files]
+"openttd_bridge" = ["openttd_bridge/README.md"]
+"openttd_bridge/OpenTTDLEBridge" = ["openttd_bridge/OpenTTDLEBridge/*.nut"]
+"openttd_bridge/OpenTTDLECompany" = ["openttd_bridge/OpenTTDLECompany/*.nut"]
+"openttd_bridge/OpenTTDLEGameScript" = ["openttd_bridge/OpenTTDLEGameScript/*.nut"]
