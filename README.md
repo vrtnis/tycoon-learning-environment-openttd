@@ -1,13 +1,10 @@
 # TycoonLE OpenTTD
 
-TycoonLE OpenTTD is the real OpenTTD/FIRS backend for TycoonLE sim-to-real evaluation. Use the JAX/Jumanji TycoonLE environment for scalable PPO training and TycoonBench; use this repo to validate policies, heuristics, and benchmark ideas against actual OpenTTD/FIRS behavior.
+TycoonLE OpenTTD is the real OpenTTD/FIRS backend for TycoonLE sim-to-real evaluation.
 
 This backend launches real OpenTTD, installs the bundled GameScript/NoAI bridge assets, executes macro-actions in the live game through the Admin Port path, and writes research artifacts for audit and replay.
 
-Related repositories:
-
-- Fast JAX/Jumanji simulator: [vrtnis/tycoon-learning-environment](https://github.com/vrtnis/tycoon-learning-environment)
-- Real OpenTTD/FIRS backend: [vrtnis/tycoon-learning-environment-openttd](https://github.com/vrtnis/tycoon-learning-environment-openttd)
+**For fast JAX/Jumanji simulation, scalable PPO training, ablations, and TycoonBench, use [vrtnis/tycoon-learning-environment](https://github.com/vrtnis/tycoon-learning-environment). Use this repository for sim-to-real validation against actual OpenTTD/FIRS behavior.**
 
 ## Example OpenTTD/FIRS State
 
