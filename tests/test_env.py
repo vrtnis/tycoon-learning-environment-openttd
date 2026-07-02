@@ -63,6 +63,13 @@ class EnvironmentTests(unittest.TestCase):
         backend = OpenTTDBackend(executable="Z:/missing/openttd.exe")
         self.assertFalse(backend.smoke()["exists"])
 
+    def test_bridge_source_root_resolves_without_openttd_install(self) -> None:
+        from openttd_le.backends.visual import _bridge_source_root
+
+        root = _bridge_source_root()
+        self.assertEqual(root.name, "openttd_bridge")
+        self.assertTrue((root / "OpenTTDLEGameScript" / "main.nut").exists())
+
     def test_invalid_action_is_counted(self) -> None:
         env = OpenTTDLEnv()
         env.reset("coal_easy_001", seed=1)

@@ -240,6 +240,8 @@ class CliTests(unittest.TestCase):
                 code = main(["smoke-openttd", "--firs"])
 
         self.assertEqual(code, 0)
+        backend_cls.return_value.smoke.assert_called_once()
+        backend_cls.return_value.smoke_launch.assert_not_called()
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["firs"]["ready"])
 
