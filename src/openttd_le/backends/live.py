@@ -2855,8 +2855,6 @@ def _recording_window_title(source: str | None = None) -> str | None:
     capture_source = source or os.environ.get("OPENTTD_RECORD_SOURCE")
     if capture_source is None:
         capture_source = "window-region=OpenTTD 15.3" if os.name == "nt" else os.environ.get("DISPLAY", ":0.0")
-    if os.name != "nt":
-        return None
     if capture_source.startswith("window-region="):
         return capture_source.removeprefix("window-region=")
     if capture_source.startswith("title="):
